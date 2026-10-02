@@ -1,10 +1,20 @@
 name: Build and test
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   macos:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: swift test -c release
       - run: make build
       - run: codesign --verify --deep --strict build/Gonzo.app
+      - name: Verify security configuration
+        run: |
+          codesign -d --verbose=2 build/Gonzo.app 2>&1 | grep -q 'flags=.*runtime'
+          codesign -d --entitlements :- build/Gonzo.app > /tmp/gonzo-entitlements.plist 2>/dev/null
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' /tmp/gonzo-entitlements.plist)" = true
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.files.user-selected.read-write' /tmp/gonzo-entitlements.plist)" = true

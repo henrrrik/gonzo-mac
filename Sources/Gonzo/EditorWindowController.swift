@@ -26,6 +26,7 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         window.title = "Gonzo"
+        window.identifier = NSUserInterfaceItemIdentifier("GonzoDocumentWindow")
         window.titlebarAppearsTransparent = true
         window.minSize = NSSize(width: 480, height: 360)
         window.isReleasedWhenClosed = false

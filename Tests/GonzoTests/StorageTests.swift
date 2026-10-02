@@ -29,6 +29,7 @@ import GonzoCore
         let length = random(min(8, storage.length - start) + 1)
         storage.replaceCharacters(in: NSRange(location: start, length: length), with: insertions[random(insertions.count)])
         #expect(storage.wordCount == WordCounter.count(storage.source))
+        #expect(storage.utf8Count == storage.string.utf8.count)
     }
 }
 

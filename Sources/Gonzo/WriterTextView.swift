@@ -7,6 +7,33 @@ final class WriterTextView: NSTextView {
 
     private var source: NSString { (textStorage as? EditorStorage)?.source ?? string as NSString }
 
+    override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        guard validateSize(ranges: [affectedCharRange], replacements: replacementString.map { [$0] }) else { return false }
+        return super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+    }
+
+    override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
+        guard validateSize(ranges: affectedRanges.map(\.rangeValue), replacements: replacementStrings) else { return false }
+        return super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+    }
+
+    private func validateSize(ranges: [NSRange], replacements: [String]?) -> Bool {
+        guard let replacements, let storage = textStorage as? EditorStorage else { return true }
+        guard ranges.count == replacements.count else { return false }
+        var bytes = storage.utf8Count
+        for (range, replacement) in zip(ranges, replacements) {
+            guard range.location <= storage.length, range.length <= storage.length - range.location else { return false }
+            bytes += replacement.utf8.count - source.substring(with: range).utf8.count
+        }
+        if bytes > GonzoDocument.maximumFileBytes {
+            if let window {
+                NSAlert(error: GonzoDocument.oversizedFileError).beginSheetModal(for: window)
+            } else { NSSound.beep() }
+            return false
+        }
+        return true
+    }
+
     func apply(_ mutation: TextMutation, name: String) {
         guard shouldChangeText(in: mutation.range, replacementString: mutation.replacement) else { return }
         textStorage?.replaceCharacters(in: mutation.range, with: mutation.replacement)

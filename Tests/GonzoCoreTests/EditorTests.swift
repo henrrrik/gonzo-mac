@@ -59,6 +59,25 @@ import Testing
     #expect(spans.contains { $0.style == .link && (text as NSString).substring(with: $0.range) == "story" })
 }
 
+@Test func malformedMarkdownHasBoundedStylingWork() {
+    let clock = ContinuousClock()
+    let duration = clock.measure {
+        for source in ["[a](" + String(repeating: "\\", count: 40),
+                       String(repeating: "[", count: 20_000),
+                       String(repeating: "`", count: 4096),
+                       String(repeating: "_", count: 4096)] {
+            _ = Markdown.spans(in: source)
+        }
+    }
+    #expect(duration < .seconds(1))
+    let source = "[🦇](https://example.com/\\(notes\\))\n# Title"
+    let spans = Markdown.spans(in: source)
+    #expect(spans.contains { $0.style == .link && (source as NSString).substring(with: $0.range) == "🦇" })
+    #expect(spans.contains { $0.style == .heading(level: 1) })
+    let longLine = String(repeating: "[", count: 20_000) + "\n**short**"
+    #expect(Markdown.spans(in: longLine).contains { $0.style == .bold })
+}
+
 @Test(arguments: [
     ("", 0), ("# **Hello** world\n\n- story", 3),
     ("Fear & loathing — 1971", 3), ("🦇 ✍️", 0),

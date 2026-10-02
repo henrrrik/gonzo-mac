@@ -4,6 +4,7 @@ import GonzoCore
 final class EditorStorage: NSTextStorage {
     private let backing = NSMutableAttributedString(string: "")
     private(set) var wordCount = 0
+    private(set) var utf8Count = 0
     private(set) var revision: UInt64 = 0
     private(set) var lastChangedRange = NSRange(location: 0, length: 0)
     var source: NSString { backing.mutableString }
@@ -22,6 +23,7 @@ final class EditorStorage: NSTextStorage {
         let oldParagraphs = Paragraphs.range(in: source, covering: NSRange(location: start, length: end - start))
         let oldCount = WordCounter.count(source, range: oldParagraphs)
         let insertedLength = (str as NSString).length
+        utf8Count += str.utf8.count - source.substring(with: range).utf8.count
         beginEditing()
         backing.replaceCharacters(in: range, with: str)
         let newRange = NSRange(location: oldParagraphs.location,

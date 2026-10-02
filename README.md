@@ -9,18 +9,24 @@ Gonzo uses Swift, AppKit and the system text engine. It has no package dependenc
 ```sh
 make build
 open build/Gonzo.app
+# Optional: install in /Applications
+make install
 ```
 
-The release app is built for the host architecture and signed locally. Copy it to Applications if desired. Distribution to other Macs requires Developer ID signing and notarization. `make debug` builds a development app; `make test` runs the tests.
+The release app is built for the host architecture, signed locally, and uses App Sandbox and Hardened Runtime. It can read and write files you select; it has no network entitlement. Copy it to Applications if desired. Distribution to other Macs requires Developer ID signing and notarization; set `GONZO_SIGNING_IDENTITY` to choose a signing identity. `make debug` builds a development app; `make test` runs the tests.
+
+Builds and installations stage and verify a new bundle before replacing the old one. Previous bundles remain in hidden staging folders so running instances keep their original executable. Restart Gonzo to use an update; remove these folders only after those instances have exited.
 
 ## Writing
 
 - Open and save UTF-8 `.md`, `.markdown`, `.mdown` and plain text files.
+- Documents are limited to 16 MB of UTF-8 text, including pasted edits. Oversized files are rejected before loading into the editor.
 - Markdown headings use graduated sizes and spacing across all six levels; emphasis, quotes, links and inline code are styled in the editor. Syntax stays visible and editable.
 - The writing column is centered and follows system light/dark appearance.
 - A live word count ignores tokens made entirely of punctuation or Markdown markers.
 - Native find and replace, undo/redo, printing, recent documents and multiple windows.
 - macOS autosave, draft recovery and coordinated document handling. Named files autosave in place; use Revert to Saved and macOS document versions to recover earlier content. Autosave runs after a delay, so the last few seconds of edits may be lost in a crash.
+- Saving refuses to overwrite external changes. Use Save As to keep your edits separately, or Revert to Saved to load the other version.
 
 | Shortcut | Action |
 | --- | --- |
@@ -40,7 +46,7 @@ Return inserts a paragraph break and continues lists or blockquotes. Return on a
 
 The editor keeps one authoritative text storage. Word counts rescan only paragraphs intersecting an edit, including joined paragraphs after newline deletion. Syntax styling is paragraph-local and applied to visible text and edited paragraphs. TextKit uses noncontiguous layout to avoid eagerly laying out the entire document. Patterns are compiled once; no whole-document Markdown render runs while typing.
 
-Opening, saving, printing, changing font size and a full native find operation can still do work proportional to file size. One exceptionally long paragraph also takes longer to count and style. Memory includes the source text, native text layout, style runs and the native undo history. There is no hard memory ceiling.
+Opening, saving, printing, changing font size and a full native find operation can still do work proportional to file size. Paragraphs longer than 4,096 UTF-16 characters remain plain text to bound syntax styling work. Memory includes the source text, native text layout, style runs and the native undo history. The document size limit bounds source size, but there is no hard process-memory ceiling.
 
 Run the repeatable storage benchmark with:
 
