@@ -30,6 +30,102 @@ struct DocumentTests {
         #expect(try document.data(ofType: "net.daringfireball.markdown") == Data(text.utf8))
     }
 
+    @Test func horizontalResizingReflowsTextWithoutLosingContent() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let controller = try #require(document.windowControllers.first as? EditorWindowController)
+        let window = try #require(controller.window)
+        let view = controller.textView
+        let container = try #require(view.textContainer)
+        let layout = try #require(view.layoutManager)
+        let text = String(repeating: "Words wrap across the writing column. ", count: 40)
+        view.insertText(text, replacementRange: NSRange(location: 0, length: 0))
+        view.setSelectedRange(NSRange(location: 0, length: 0))
+        var heights: [CGFloat] = []
+        for width: CGFloat in [1100, 480, 860, 600, 1100] {
+            window.setContentSize(NSSize(width: width, height: 700))
+            window.contentView?.layoutSubtreeIfNeeded()
+            layout.ensureLayout(for: container)
+            let scroll = try #require(view.enclosingScrollView)
+            #expect(abs(view.frame.width - scroll.contentSize.width) < 1)
+            #expect(abs(container.containerSize.width - (view.frame.width - 2 * view.textContainerInset.width)) < 1)
+            let used = layout.usedRect(for: container)
+            #expect(used.width > 0 && used.width <= container.containerSize.width + 1)
+            #expect(view.frame.height >= used.maxY + view.textContainerInset.height)
+            heights.append(used.height)
+            #expect(document.storage.string == text)
+            #expect(view.selectedRange() == NSRange(location: 0, length: 0))
+        }
+        #expect(heights[1] > heights[0])
+        #expect(abs(heights[4] - heights[0]) < 1)
+    }
+
+    @Test func mouseInsertionMatchesRenderedGlyphsAfterResizeAndScroll() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let controller = try #require(document.windowControllers.first as? EditorWindowController)
+        let window = try #require(controller.window)
+        let view = controller.textView
+        let layout = try #require(view.layoutManager)
+        let container = try #require(view.textContainer)
+        let text = "# Heading\n\n" + String(repeating: "## Section\n\nA paragraph with **bold** and *italic* words that wraps onto several lines.\n\n", count: 20)
+        view.insertText(text, replacementRange: NSRange(location: 0, length: 0))
+        for width: CGFloat in [1060, 480, 800, 1060] {
+            window.setContentSize(NSSize(width: width, height: 500))
+            window.contentView?.layoutSubtreeIfNeeded()
+            for index in [0, 150, 700, 1200] {
+                view.scrollRangeToVisible(NSRange(location: index, length: 1))
+                layout.ensureLayout(for: container)
+                let glyph = layout.glyphIndexForCharacter(at: index)
+                let rect = layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+                let point = NSPoint(x: rect.minX + rect.width * 0.2 + view.textContainerOrigin.x,
+                                    y: rect.midY + view.textContainerOrigin.y)
+                #expect(view.characterIndexForInsertion(at: point) == index)
+            }
+        }
+    }
+
+    @Test func highlightingPreservesSelectionAffinityDuringDrag() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let controller = try #require(document.windowControllers.first as? EditorWindowController)
+        let view = controller.textView
+        view.insertText("# Heading\n\nSelect these words with the mouse.", replacementRange: NSRange(location: 0, length: 0))
+        let selection = NSRange(location: 12, length: 15)
+        view.setSelectedRange(selection, affinity: .upstream, stillSelecting: true)
+        view.selectionGranularity = .selectByWord
+        let highlighter = MarkdownHighlighter(textView: view)
+        highlighter.refreshVisible()
+        #expect(view.selectedRange() == selection)
+        #expect(view.selectionAffinity == .upstream)
+        #expect(view.selectionGranularity == .selectByWord)
+    }
+
+    @Test func insertionFontFollowsHeadingBodyAndTextSizeChanges() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let controller = try #require(document.windowControllers.first as? EditorWindowController)
+        let view = controller.textView
+        #expect(view.font?.pointSize == 13)
+        view.insertText("# Heading\n\nBody text\n", replacementRange: NSRange(location: 0, length: 0))
+        func expectInsertionFont(at index: Int, size: CGFloat) {
+            view.setSelectedRange(NSRange(location: index, length: 0))
+            let font = view.typingAttributes[.font] as? NSFont
+            #expect(font?.pointSize == size)
+        }
+        expectInsertionFont(at: 5, size: 13 * 1.75)
+        expectInsertionFont(at: 15, size: 13)
+        expectInsertionFont(at: view.string.utf16.count, size: 13)
+        view.setSelectedRange(NSRange(location: 5, length: 0))
+        controller.biggerText(nil)
+        #expect((view.typingAttributes[.font] as? NSFont)?.pointSize == 14 * 1.75)
+        controller.resetTextSize(nil)
+        #expect((view.typingAttributes[.font] as? NSFont)?.pointSize == 13 * 1.75)
+        view.setSelectedRange(NSRange(location: 0, length: view.string.utf16.count))
+        view.insertText("", replacementRange: view.selectedRange())
+        #expect((view.typingAttributes[.font] as? NSFont)?.pointSize == 13)
+    }
+
     @Test @MainActor func invalidUTF8DoesNotReplaceDocument() throws {
         let document = GonzoDocument()
         try document.read(from: Data("Keep this story".utf8), ofType: "public.plain-text")

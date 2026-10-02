@@ -4,8 +4,60 @@ import GonzoCore
 @MainActor
 final class WriterTextView: NSTextView {
     var defaultTypingAttributes: [NSAttributedString.Key: Any] = [:]
+    var writingColumnWidth: CGFloat = 507 {
+        didSet { updateWrappingWidth() }
+    }
+    private var isUpdatingWrappingWidth = false
+    private(set) var isTrackingMouseSelection = false
+    var didFinishMouseSelection: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        // AppKit tracks dragging inside this call. Defer viewport styling
+        // until it returns so heading metrics cannot change under the mouse.
+        isTrackingMouseSelection = true
+        defer {
+            isTrackingMouseSelection = false
+            didFinishMouseSelection?()
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateWrappingWidth()
+    }
+
+    private func updateWrappingWidth() {
+        guard !isUpdatingWrappingWidth, let container = textContainer, frame.width > 0 else { return }
+        isUpdatingWrappingWidth = true
+        defer { isUpdatingWrappingWidth = false }
+        let inset = NSSize(width: max(24, (frame.width - writingColumnWidth) / 2), height: 48)
+        if textContainerInset != inset { textContainerInset = inset }
+        let size = NSSize(width: max(1, frame.width - 2 * inset.width), height: CGFloat.greatestFiniteMagnitude)
+        if container.containerSize != size { container.containerSize = size }
+        needsDisplay = true
+    }
 
     private var source: NSString { (textStorage as? EditorStorage)?.source ?? string as NSString }
+
+    func updateInsertionAttributes() {
+        var attributes = defaultTypingAttributes
+        let position = selectedRange().location
+        let length = source.length
+        // A new empty paragraph must use the body font, rather than inherit
+        // the heading on the preceding line. Else follow the styled text.
+        if length > 0, position <= length,
+           !(position == length && source.substring(from: length - 1).rangeOfCharacter(from: .newlines) != nil) {
+            let index = min(position, length - 1)
+            if let storage = textStorage {
+                for key in [NSAttributedString.Key.font, .paragraphStyle] {
+                    if let value = storage.attribute(key, at: index, effectiveRange: nil) { attributes[key] = value }
+                }
+            }
+        }
+        typingAttributes = attributes
+        updateInsertionPointStateAndRestartTimer(true)
+    }
 
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
         guard validateSize(ranges: [affectedCharRange], replacements: replacementString.map { [$0] }) else { return false }
@@ -40,7 +92,7 @@ final class WriterTextView: NSTextView {
         setSelectedRange(mutation.selection)
         didChangeText()
         undoManager?.setActionName(name)
-        typingAttributes = defaultTypingAttributes
+        updateInsertionAttributes()
         scrollRangeToVisible(selectedRange())
     }
 
@@ -83,6 +135,6 @@ final class WriterTextView: NSTextView {
 
     override func didChangeText() {
         super.didChangeText()
-        typingAttributes = defaultTypingAttributes
+        updateInsertionAttributes()
     }
 }

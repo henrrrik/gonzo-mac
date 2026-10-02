@@ -8,7 +8,7 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
     private let statusLabel = NSTextField(labelWithString: "Markdown")
     private var highlighter: MarkdownHighlighter!
     private var isStyling = false
-    private var fontSize: CGFloat = 19
+    private var fontSize: CGFloat = 13
     private let storage: EditorStorage
 
     init(document: GonzoDocument) {
@@ -16,7 +16,9 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
         let layout = NSLayoutManager()
         layout.allowsNonContiguousLayout = true
         let container = NSTextContainer(containerSize: NSSize(width: 700, height: CGFloat.greatestFiniteMagnitude))
-        container.widthTracksTextView = true
+        // The centered writing column sets its width explicitly along with
+        // the view and insets, rather than racing automatic width tracking.
+        container.widthTracksTextView = false
         container.heightTracksTextView = false
         layout.addTextContainer(container)
         document.storage.addLayoutManager(layout)
@@ -53,6 +55,7 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
 
     private func configureEditor() {
         textView.delegate = self
+        textView.didFinishMouseSelection = { [weak self] in self?.viewportChanged() }
         textView.isRichText = false
         textView.importsGraphics = false
         textView.allowsUndo = true
@@ -151,7 +154,7 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
         isStyling = true
         highlighter.refreshEditedParagraphs()
         isStyling = false
-        textView.typingAttributes = highlighter.baseAttributes
+        textView.updateInsertionAttributes()
         updateWordCount()
         // NSTextView's undo registrations notify NSDocument of content changes.
     }
@@ -161,25 +164,39 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
         wordLabel.stringValue = "\(count.formatted()) \(count == 1 ? "word" : "words")"
     }
 
+    func textViewDidChangeSelection(_ notification: Notification) {
+        guard !isStyling, !textView.isTrackingMouseSelection else { return }
+        textView.updateInsertionAttributes()
+    }
+
     @objc private func viewportChanged() {
-        guard !isStyling, highlighter != nil else { return }
+        guard !isStyling, !textView.isTrackingMouseSelection, highlighter != nil else { return }
         isStyling = true
         highlighter.refreshVisible()
         isStyling = false
+        textView.updateInsertionAttributes()
     }
 
     func windowDidResize(_ notification: Notification) { updateColumn(); viewportChanged() }
 
     private func updateColumn() {
-        let width = scrollView.contentSize.width
-        let column = fontSize * 0.6 * 65
-        textView.textContainerInset = NSSize(width: max(24, (width - column) / 2), height: 48)
-        textView.minSize.height = scrollView.contentSize.height
+        window?.contentView?.layoutSubtreeIfNeeded()
+        let viewport = scrollView.contentSize
+        guard viewport.width > 0 else { return }
+        let width = viewport.width
+        let wasStyling = isStyling
+        isStyling = true
+        textView.writingColumnWidth = fontSize * 0.6 * 65
+        textView.minSize = NSSize(width: 0, height: viewport.height)
+        textView.setFrameSize(NSSize(width: width, height: max(viewport.height, textView.frame.height)))
+        textView.sizeToFit()
+        textView.needsDisplay = true
+        isStyling = wasStyling
     }
 
     @objc func biggerText(_ sender: Any?) { fontSize = min(32, fontSize + 1); applyFontSize() }
     @objc func smallerText(_ sender: Any?) { fontSize = max(12, fontSize - 1); applyFontSize() }
-    @objc func resetTextSize(_ sender: Any?) { fontSize = 19; applyFontSize() }
+    @objc func resetTextSize(_ sender: Any?) { fontSize = 13; applyFontSize() }
 
     private func applyFontSize() {
         highlighter.fontSize = fontSize

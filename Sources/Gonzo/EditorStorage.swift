@@ -48,7 +48,7 @@ final class MarkdownHighlighter {
     private weak var textView: NSTextView?
     private var styledRange = NSRange(location: NSNotFound, length: 0)
     private var revision: UInt64 = .max
-    var fontSize: CGFloat = 19
+    var fontSize: CGFloat = 13
 
     init(textView: NSTextView) { self.textView = textView }
 
@@ -90,7 +90,8 @@ final class MarkdownHighlighter {
 
     private func style(_ range: NSRange) {
         guard let view = textView, let storage = view.textStorage, range.length > 0 else { return }
-        let selection = view.selectedRanges
+        // Attribute-only edits preserve selection. Reassigning selectedRanges
+        // here resets AppKit's word/line selection mode during a mouse drag.
         let text = (storage as? EditorStorage)?.source.substring(with: range) ?? (storage.string as NSString).substring(with: range)
         storage.beginEditing()
         storage.setAttributes(baseAttributes, range: range)
@@ -124,6 +125,5 @@ final class MarkdownHighlighter {
             storage.addAttributes(attributes, range: absolute)
         }
         storage.endEditing()
-        view.selectedRanges = selection
     }
 }
