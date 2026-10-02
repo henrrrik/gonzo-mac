@@ -1,0 +1,10 @@
+name: Build and test
+on: [push, pull_request]
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test -c release
+      - run: make build
+      - run: codesign --verify --deep --strict build/Gonzo.app
