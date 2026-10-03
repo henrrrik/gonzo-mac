@@ -2,7 +2,7 @@
 
 A native macOS Markdown writing app, inspired by [Omawrite](https://github.com/omacom/omawrite). Named in homage to Hunter S. Thompson and gonzo journalism: get out of the way and let the story happen.
 
-Gonzo uses Swift, AppKit and the system text engine. It has no package dependencies, embedded browser, background service or network access. Requires macOS 14 or later and a Swift 6 toolchain to build.
+Gonzo uses Swift, AppKit and the system text engine. It has no package dependencies, embedded browser, background service or network access. Requires macOS 27 or later and Swift 6.4 (Xcode 27) to build. CI uses GitHub’s `xcode-27` runner with Xcode 27.0 explicitly selected.
 
 ## Build and run
 
