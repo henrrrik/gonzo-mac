@@ -44,9 +44,9 @@ Return inserts a paragraph break and continues lists or blockquotes. Return on a
 
 ## Performance design
 
-The editor keeps one authoritative text storage. Word counts rescan only paragraphs intersecting an edit, including joined paragraphs after newline deletion. Syntax styling is paragraph-local and applied to visible text and edited paragraphs. TextKit uses noncontiguous layout to avoid eagerly laying out the entire document. Patterns are compiled once; no whole-document Markdown render runs while typing.
+The editor keeps one authoritative text storage. A block index maintains word counts and paragraph boundaries; small edits rebuild at most the neighboring 1,024-unit blocks, even inside a long paragraph or unbroken word. Syntax styling is paragraph-local, caches up to 256 paragraphs, and changes attributes only when needed. Oversized paragraphs stay plain across edits without repeated scans. TextKit uses noncontiguous layout to avoid eagerly laying out the entire document. Patterns are compiled once; no whole-document Markdown render runs while typing.
 
-Opening, saving, printing, changing font size and a full native find operation can still do work proportional to file size. Paragraphs longer than 4,096 UTF-16 characters remain plain text to bound syntax styling work. Memory includes the source text, native text layout, style runs and the native undo history. The document size limit bounds source size, but there is no hard process-memory ceiling.
+Opening prepares UTF-8 text and its index on AppKit’s opening queue before installing them on the main thread. Saving captures an immutable text value, then serializes, checks conflicts and writes on AppKit’s save worker. The saved bytes also supply the conflict digest. Closing clears undo and detaches text layout from the storage so native view caches do not retain the document. Opening, snapshot capture, saving, printing, changing font size and a full native find operation can still do work proportional to file size. Native layout of unusually long paragraphs can also remain expensive. Paragraphs longer than 4,096 UTF-16 characters remain plain text to bound syntax styling work. TextKit reads use a cached string snapshot that is invalidated by text edits, avoiding repeated full-text bridging during layout. Memory includes the source, cached snapshot, block index, native text layout, style runs and undo history. The document size limit bounds source size, but there is no hard process-memory ceiling.
 
 Run the repeatable storage benchmark with:
 
@@ -54,7 +54,13 @@ Run the repeatable storage benchmark with:
 swift test -c release --filter largeDocumentEditingBenchmark
 ```
 
-This measures 1,000 insert/delete operations in a 5.16 MB fixture; it does not measure end-to-end keyboard latency, rendering, disk I/O or autosave. Measure process memory on a release app with Activity Monitor or `footprint`; debug builds and RSS are not a reliable substitute for physical footprint.
+For opt-in release benchmarks covering different file sizes, huge paragraphs, native edits, resizing, safe saves and repeated window lifetimes, run:
+
+```sh
+GONZO_PERFORMANCE_TESTS=1 swift test -c release --filter PerformanceTests
+```
+
+The storage benchmark measures 1,000 insert/delete operations in a 5.16 MB fixture; it does not measure end-to-end keyboard latency, rendering, disk I/O or autosave. Measure process memory on a release app with Activity Monitor or `footprint`; debug builds and RSS are not a reliable substitute for physical footprint.
 
 ## Scope
 

@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 final class GonzoDocumentController: NSDocumentController {
-    override func documentClass(forType typeName: String) -> AnyClass? { GonzoDocument.self }
+    override nonisolated func documentClass(forType typeName: String) -> AnyClass? { GonzoDocument.self }
     override var defaultType: String? { "net.daringfireball.markdown" }
 }
 

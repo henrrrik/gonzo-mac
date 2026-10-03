@@ -85,3 +85,15 @@ import Testing
 ]) func wordCount(text: String, expected: Int) {
     #expect(WordCounter.count(text as NSString) == expected)
 }
+
+@Test func returnUsesIndexedBoundariesAndBoundsListPrefixWork() {
+    let text = ("9) " + String(repeating: "word ", count: 200_000)) as NSString
+    let mutation = EditorCommands.newline(text, selection: NSRange(location: text.length, length: 0), soft: false,
+                                          paragraphRange: NSRange(location: 0, length: text.length))
+    #expect(mutation.replacement == "\n10) ")
+    let indented = ("- " + String(repeating: " ", count: 5000) + "body") as NSString
+    let continuing = EditorCommands.newline(indented, selection: NSRange(location: indented.length, length: 0), soft: false,
+                                             paragraphRange: NSRange(location: 0, length: indented.length))
+    #expect(continuing.range.length == 0)
+    #expect(continuing.replacement == "\n- ")
+}

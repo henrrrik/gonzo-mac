@@ -334,4 +334,126 @@ struct DocumentTests {
         undo.redo()
         #expect(document.storage.string == "**Fear** and loathing")
     }
+    @Test func concurrentOpenInstallsPreparedTextBeforeCreatingViews() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let text = String(repeating: "café 東京 🦇\n", count: 10_000)
+        try Data(text.utf8).write(to: url)
+        let document: GonzoDocument = try await withCheckedThrowingContinuation { continuation in
+            Self.documents.openDocument(withContentsOf: url, display: true) { document, _, error in
+                if let error { continuation.resume(throwing: error) }
+                else if let document = document as? GonzoDocument { continuation.resume(returning: document) }
+                else { continuation.resume(throwing: CocoaError(.fileReadUnknown)) }
+            }
+        }
+        defer { document.close() }
+        #expect(document.storage.string == text)
+        #expect(document.storage.wordCount == 20_000)
+        #expect((document.windowControllers.first as? EditorWindowController)?.textView.string == text)
+    }
+
+    @Test func backgroundRecoveryTransfersPreparedTextAndOriginalBaseline() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = directory.appendingPathComponent("original.md")
+        let recovery = directory.appendingPathComponent("recovery.md")
+        try Data("Original".utf8).write(to: original)
+        try Data("Recovered café 東京".utf8).write(to: recovery)
+        // Transfer a freshly opened document once, as NSDocumentController
+        // does. No worker retains or accesses it after this handoff.
+        struct Opened: @unchecked Sendable { let document: GonzoDocument }
+        let opened = try await Task.detached {
+            Opened(document: try GonzoDocument(for: original, withContentsOf: recovery, ofType: "net.daringfireball.markdown"))
+        }.value
+        let document = opened.document
+        Self.documents.addDocument(document)
+        defer { document.close() }
+        #expect(document.storage.string == "Recovered café 東京")
+        #expect(document.storage.wordCount == 3)
+        #expect(document.isDocumentEdited)
+        try await save(document, to: original, operation: .saveOperation)
+        #expect(try String(contentsOf: original, encoding: .utf8) == "Recovered café 東京")
+    }
+
+    @Test func asynchronousSaveKeepsSnapshotAndLaterEditsDirty() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = GonzoDocument()
+        Self.documents.addDocument(document)
+        defer { document.close() }
+        document.fileType = "net.daringfireball.markdown"
+        let first = String(repeating: "First draft\n", count: 100_000)
+        try document.read(from: Data(first.utf8), ofType: document.fileType!)
+        document.updateChangeCount(.changeDone)
+        let saving = Task { @MainActor in
+            try await save(document, to: url, operation: .saveAsOperation)
+        }
+        // The save request can be queued by AppKit. Wait for its actual
+        // snapshot handoff, rather than changing text before saving starts.
+        while document.saveGeneration == 0 { await Task.yield() }
+        document.storage.replaceCharacters(in: NSRange(location: 0, length: document.storage.length), with: "Later edits")
+        document.updateChangeCount(.changeDone)
+        try await saving.value
+        #expect(try String(contentsOf: url, encoding: .utf8) == first)
+        #expect(document.storage.string == "Later edits")
+        #expect(document.isDocumentEdited)
+        // The conflict baseline must describe the snapshot, not later edits.
+        try await save(document, to: url, operation: .saveOperation)
+        #expect(try String(contentsOf: url, encoding: .utf8) == "Later edits")
+        #expect(!document.isDocumentEdited)
+    }
+
+    @Test func closeReleasesDocumentStorageDespiteNativeViewCaching() throws {
+        weak var survivingDocument: GonzoDocument?
+        weak var survivingStorage: EditorStorage?
+        try autoreleasepool {
+            let document = GonzoDocument()
+            survivingDocument = document
+            survivingStorage = document.storage
+            try document.read(from: Data(String(repeating: "word ", count: 200_000).utf8), ofType: "net.daringfireball.markdown")
+            document.makeWindowControllers()
+            let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+            view.insertText("x", replacementRange: NSRange(location: 500_000, length: 0))
+            document.close()
+            #expect(document.storage.layoutManagers.isEmpty)
+            #expect(document.undoManager?.canUndo == false)
+        }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        #expect(survivingDocument == nil)
+        #expect(survivingStorage == nil)
+    }
+
+    @Test func paragraphStylingCacheSurvivesEditsAndPlainModeTransitions() throws {
+        let document = GonzoDocument()
+        try document.read(from: Data("# Title\nBody\n".utf8), ofType: "net.daringfireball.markdown")
+        document.makeWindowControllers()
+        defer { document.close() }
+        let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+        let highlighter = MarkdownHighlighter(textView: view)
+        highlighter.refreshEditedParagraphs()
+        let styled = highlighter.styledParagraphCount
+        highlighter.refreshEditedParagraphs()
+        #expect(highlighter.styledParagraphCount == styled)
+        document.storage.replaceCharacters(in: NSRange(location: 2, length: 0), with: "x")
+        highlighter.refreshEditedParagraphs()
+        #expect(highlighter.styledParagraphCount == styled + 1)
+        document.storage.replaceCharacters(in: NSRange(location: 0, length: document.storage.length), with: "# " + String(repeating: "a", count: 5000))
+        highlighter.refreshEditedParagraphs()
+        let plainCount = highlighter.styledParagraphCount
+        for _ in 0..<10 {
+            document.storage.replaceCharacters(in: NSRange(location: 10, length: 0), with: "x")
+            highlighter.refreshEditedParagraphs()
+        }
+        #expect(highlighter.styledParagraphCount == plainCount)
+        #expect((document.storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize == 13)
+        document.storage.replaceCharacters(in: NSRange(location: 20, length: document.storage.length - 20), with: "")
+        highlighter.refreshEditedParagraphs()
+        #expect(highlighter.styledParagraphCount == plainCount + 1)
+        #expect((document.storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize == 13 * 1.75)
+        document.storage.replaceCharacters(in: NSRange(location: 0, length: document.storage.length), with: String(repeating: "A paragraph\n", count: 1000))
+        highlighter.refreshEditedParagraphs()
+        #expect(highlighter.cachedParagraphCount <= 256)
+    }
+
 }

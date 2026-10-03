@@ -55,8 +55,10 @@ final class WriterTextView: NSTextView {
                 }
             }
         }
-        typingAttributes = attributes
-        updateInsertionPointStateAndRestartTimer(true)
+        if !NSDictionary(dictionary: typingAttributes).isEqual(to: attributes) {
+            typingAttributes = attributes
+            updateInsertionPointStateAndRestartTimer(true)
+        }
     }
 
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
@@ -92,7 +94,6 @@ final class WriterTextView: NSTextView {
         setSelectedRange(mutation.selection)
         didChangeText()
         undoManager?.setActionName(name)
-        updateInsertionAttributes()
         scrollRangeToVisible(selectedRange())
     }
 
@@ -121,7 +122,8 @@ final class WriterTextView: NSTextView {
         // Marked text belongs to the input method. Let AppKit commit it first.
         if hasMarkedText() { super.insertNewline(sender); return }
         let soft = NSApp.currentEvent?.modifierFlags.contains(.shift) == true
-        apply(EditorCommands.newline(source, selection: selectedRange(), soft: soft), name: "New Paragraph")
+        let paragraph = (textStorage as? EditorStorage)?.paragraphRange(covering: NSRange(location: selectedRange().location, length: 0))
+        apply(EditorCommands.newline(source, selection: selectedRange(), soft: soft, paragraphRange: paragraph), name: "New Paragraph")
     }
 
     override func deleteBackward(_ sender: Any?) {

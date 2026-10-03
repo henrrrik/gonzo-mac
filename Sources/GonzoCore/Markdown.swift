@@ -149,16 +149,16 @@ public enum EditorCommands {
 
     private static let list = try! NSRegularExpression(pattern: #"^(\s*)([-+*]|\d+[.)]|>+)\s+(.*)$"#)
 
-    public static func newline(_ text: NSString, selection: NSRange, soft: Bool) -> TextMutation {
+    public static func newline(_ text: NSString, selection: NSRange, soft: Bool, paragraphRange: NSRange? = nil) -> TextMutation {
         var range = selection
         var insertion = soft ? "\n" : "\n\n"
         if !soft {
-            let paragraph = Paragraphs.range(in: text, covering: NSRange(location: selection.location, length: 0))
+            let paragraph = paragraphRange ?? Paragraphs.range(in: text, covering: NSRange(location: selection.location, length: 0))
             let line = text.substring(with: NSRange(location: paragraph.location,
-                                                    length: selection.location - paragraph.location))
+                                                    length: min(4096, selection.location - paragraph.location)))
             if let match = list.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) {
                 let source = line as NSString
-                if match.range(at: 3).length == 0 {
+                if match.range(at: 3).length == 0, selection.location - paragraph.location <= 4096 {
                     range = NSRange(location: paragraph.location, length: NSMaxRange(selection) - paragraph.location)
                     insertion = "\n"
                 } else {
