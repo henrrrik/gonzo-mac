@@ -78,6 +78,16 @@ import Testing
     #expect(Markdown.spans(in: longLine).contains { $0.style == .bold })
 }
 
+// ICU's multiline anchors also match after U+000B, U+000C and U+0085, which do
+// not split paragraphs. Block syntax must anchor only at the paragraph start,
+// otherwise a paragraph of those characters makes each pattern quadratic.
+@Test(arguments: ["x\u{0B}> q", "x\u{0C}- item", "x\u{85}# Title", "x\u{0B}***"])
+func blockSyntaxAnchorsOnlyAtParagraphStart(source: String) {
+    let spans = Markdown.spans(in: source)
+    #expect(!spans.contains { $0.style == .quote || $0.style == .marker })
+    #expect(!spans.contains { if case .heading = $0.style { true } else { false } })
+}
+
 @Test(arguments: [
     ("", 0), ("# **Hello** world\n\n- story", 3),
     ("Fear & loathing — 1971", 3), ("🦇 ✍️", 0),

@@ -68,9 +68,19 @@ final class GonzoDocument: NSDocument {
         // AppKit asks on the main thread before starting its worker and
         // blocking user interaction. Capture the immutable value here; the
         // worker cannot ask the blocked main thread for NSTextStorage.
-        ioState.stageSave(storage.string)
+        ioState.stageSave(saveSnapshot())
         saveGeneration &+= 1
         return true
+    }
+
+    /// NSTextView coalesces typing into one undo action. End it exactly where
+    /// the saved text is captured, beside AppKit's saved change token, so later
+    /// typing registers a new change instead of joining one already saved.
+    /// Ending it earlier, when a save is merely requested, is not enough:
+    /// a queued save can snapshot typing that started after the request.
+    private func saveSnapshot() -> String {
+        for controller in windowControllers { (controller as? EditorWindowController)?.textView.breakUndoCoalescing() }
+        return storage.string
     }
 
     override nonisolated init() {
@@ -165,7 +175,7 @@ final class GonzoDocument: NSDocument {
 
     override nonisolated func data(ofType typeName: String) throws -> Data {
         if let snapshot = Thread.current.threadDictionary[snapshotKey] as? Data { return snapshot }
-        return onMain { Data(self.storage.string.utf8) }
+        return onMain { Data(self.saveSnapshot().utf8) }
     }
 
     override nonisolated func write(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, originalContentsURL: URL?) throws {
@@ -184,7 +194,7 @@ final class GonzoDocument: NSDocument {
     override nonisolated func writeSafely(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType) throws {
         let text: String
         if !Thread.isMainThread, let pending = ioState.takeSave() { text = pending }
-        else { text = onMain { self.storage.string } }
+        else { text = onMain { self.saveSnapshot() } }
         let snapshot = Data(text.utf8)
         let dictionary = Thread.current.threadDictionary
         let previous = dictionary[snapshotKey]

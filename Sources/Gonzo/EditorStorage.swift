@@ -50,8 +50,23 @@ final class EditorStorage: NSTextStorage {
         return text
     }
 
+    // Forward every read to the backing store. NSAttributedString's generic
+    // subclass versions rebuild runs one primitive call at a time, which made
+    // fixAttributes on each keystroke scale with fallback-font runs in the document.
     override func attributes(at location: Int, effectiveRange range: NSRangePointer?) -> [NSAttributedString.Key: Any] {
         backing.attributes(at: location, effectiveRange: range)
+    }
+    override func attributes(at location: Int, longestEffectiveRange range: NSRangePointer?, in rangeLimit: NSRange) -> [NSAttributedString.Key: Any] {
+        backing.attributes(at: location, longestEffectiveRange: range, in: rangeLimit)
+    }
+    override func attribute(_ name: NSAttributedString.Key, at location: Int, effectiveRange range: NSRangePointer?) -> Any? {
+        backing.attribute(name, at: location, effectiveRange: range)
+    }
+    override func attribute(_ name: NSAttributedString.Key, at location: Int, longestEffectiveRange range: NSRangePointer?, in rangeLimit: NSRange) -> Any? {
+        backing.attribute(name, at: location, longestEffectiveRange: range, in: rangeLimit)
+    }
+    override func attributedSubstring(from range: NSRange) -> NSAttributedString {
+        backing.attributedSubstring(from: range)
     }
 
     override func replaceCharacters(in range: NSRange, with str: String) {

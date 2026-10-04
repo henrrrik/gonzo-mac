@@ -30,7 +30,10 @@ public enum Markdown {
     ]
 
     private static func rule(_ pattern: String, _ groups: [(Int, MarkdownStyle)]) -> Rule {
-        Rule(regex: try! NSRegularExpression(pattern: pattern, options: .anchorsMatchLines), groups: groups)
+        // Paragraphs are split before matching, so anchors bind to the paragraph.
+        // Multiline anchors would also match after U+000B, U+000C and U+0085,
+        // letting each anchored rule rescan the paragraph from every position.
+        Rule(regex: try! NSRegularExpression(pattern: pattern), groups: groups)
     }
 
     public static func spans(in text: String) -> [MarkdownSpan] {

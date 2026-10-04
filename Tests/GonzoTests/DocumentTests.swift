@@ -404,6 +404,81 @@ struct DocumentTests {
         #expect(!document.isDocumentEdited)
     }
 
+    @Test func typingAfterSaveAndAutosaveStaysDirtyAndUndoesSeparately() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+        let undo = try #require(document.undoManager)
+        // Type through NSTextView's coalescing path, letting each event's undo group close.
+        func type(_ text: String) {
+            for character in text {
+                view.insertText(String(character), replacementRange: view.selectedRange())
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+            }
+        }
+        type("abc")
+        try await save(document, to: url, operation: .saveAsOperation)
+        #expect(!document.isDocumentEdited)
+        type("def")
+        #expect(document.isDocumentEdited)
+        #expect(document.hasUnautosavedChanges)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            document.autosave(withImplicitCancellability: false) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+        #expect(try String(contentsOf: url, encoding: .utf8) == "abcdef")
+        type("ghi")
+        #expect(document.hasUnautosavedChanges)
+        // Each save point is a separate undo step, so undo returns to saved text.
+        undo.undo()
+        #expect(document.storage.string == "abcdef")
+        undo.undo()
+        #expect(document.storage.string == "abc")
+    }
+
+    @Test func typingWhileSavesAreQueuedNeverLeavesUnsavedTextClean() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+        // A large document keeps each write in flight long enough for AppKit to
+        // queue the autosave behind the save, then snapshot after more typing.
+        view.insertText(String(repeating: "Draft line\n", count: 30_000), replacementRange: NSRange(location: 0, length: 0))
+        try await save(document, to: url, operation: .saveAsOperation)
+        let finished = SaveCounter()
+        func type(_ text: String) {
+            for character in text {
+                view.insertText(String(character), replacementRange: view.selectedRange())
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+            }
+        }
+        func waitForSaves(_ count: Int) throws {
+            let deadline = Date(timeIntervalSinceNow: 30)
+            while finished.count < count {
+                try #require(Date() < deadline, "Saves did not complete")
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+            }
+        }
+        for round in 1...3 {
+            type("d")
+            document.save(to: url, ofType: "net.daringfireball.markdown", for: .saveOperation) { finished.record($0) }
+            document.autosave(withImplicitCancellability: false) { finished.record($0) }
+            type("ee")
+            try waitForSaves(2 * round)
+            // Failed saves would leave the document dirty and pass vacuously.
+            #expect(finished.errors.isEmpty)
+            let disk = try String(contentsOf: url, encoding: .utf8)
+            #expect(disk.filter { $0 == "d" }.count == round)
+            #expect(disk == document.storage.string || document.hasUnautosavedChanges)
+            type("f")
+            #expect(document.hasUnautosavedChanges)
+        }
+    }
+
     @Test func closeReleasesDocumentStorageDespiteNativeViewCaching() throws {
         weak var survivingDocument: GonzoDocument?
         weak var survivingStorage: EditorStorage?
@@ -456,4 +531,14 @@ struct DocumentTests {
         #expect(highlighter.cachedParagraphCount <= 256)
     }
 
+}
+
+private final class SaveCounter: @unchecked Sendable {
+    // AppKit invokes save completion handlers on the main thread.
+    private(set) var count = 0
+    private(set) var errors: [Error] = []
+    func record(_ error: Error?) {
+        count += 1
+        if let error { errors.append(error) }
+    }
 }

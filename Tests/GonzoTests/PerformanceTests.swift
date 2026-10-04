@@ -129,6 +129,41 @@ struct PerformanceTests {
         footprint("after long-paragraph native edits")
     }
 
+    // Fallback fonts split CJK and emoji text into many attribute runs, and every
+    // native edit fixes attributes. Compare how per-keystroke time scales with size.
+    @Test func nonASCIITypingBenchmark() throws {
+        _ = NSApplication.shared
+        let paragraph = "## 東京の夜\n\nFear and loathing 🦇 in 東京, **café** and *naïve* prose ✍️.\n\n"
+        for repetitions in [1_000, 10_000] {
+            let text = String(repeating: paragraph, count: repetitions)
+            let bytes = text.utf8.count
+            try autoreleasepool {
+                let document = GonzoDocument()
+                defer { document.close() }
+                try document.read(from: Data(text.utf8), ofType: "net.daringfireball.markdown")
+                document.makeWindowControllers()
+                document.showWindows()
+                let controller = try #require(document.windowControllers.first as? EditorWindowController)
+                let view = controller.textView
+                let window = try #require(controller.window)
+                let middle = document.storage.length / 2
+                view.scrollRangeToVisible(NSRange(location: middle, length: 0))
+                window.display()
+                for run in ["cold", "warm"] {
+                    measure("\(bytes) non-ASCII 10 native keystrokes with display (\(run))") {
+                        for offset in 0..<10 {
+                            autoreleasepool {
+                                view.insertText("x", replacementRange: NSRange(location: middle + offset, length: 0))
+                                window.display()
+                            }
+                        }
+                    }
+                }
+                #expect(document.storage.length == (text as NSString).length + 20)
+            }
+        }
+    }
+
     @Test func windowLifetimeFootprint() throws {
         _ = NSApplication.shared
         footprint("fresh lifecycle baseline")
