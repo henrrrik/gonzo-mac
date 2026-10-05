@@ -7,7 +7,8 @@ import GonzoCore
 private final class DocumentIOState: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: EditorStorage.Prepared?
-    private var digest: SHA256.Digest?
+    private var digest: Data?
+    private var recorded: Data?
     private var saveSnapshot: String?
     func stageSave(_ text: String) { lock.lock(); defer { lock.unlock() }; saveSnapshot = text }
     func takeSave() -> String? {
@@ -19,8 +20,16 @@ private final class DocumentIOState: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let value = pending; pending = nil; return value
     }
-    func baseline() -> SHA256.Digest? { lock.lock(); defer { lock.unlock() }; return digest }
-    func setBaseline(_ value: SHA256.Digest?) { lock.lock(); defer { lock.unlock() }; digest = value }
+    func baseline() -> Data? { lock.lock(); defer { lock.unlock() }; return digest }
+    func setBaseline(_ value: Data?) { lock.lock(); defer { lock.unlock() }; digest = value; recorded = value }
+    /// The original contents a draft is based on, recorded with autosaved drafts.
+    /// It survives a conflict baseline that only says the original is missing
+    /// or unreadable, so a later relaunch still detects changes.
+    func recordedBaseline() -> Data? { lock.lock(); defer { lock.unlock() }; return recorded }
+    func setBaselines(conflict: Data?, recorded value: Data?) {
+        lock.lock(); defer { lock.unlock() }
+        digest = conflict; recorded = value
+    }
 }
 
 private final class MainThreadResult<Value: Sendable>: @unchecked Sendable {
@@ -104,10 +113,20 @@ final class GonzoDocument: NSDocument {
             if url != contentsURL { self.updateChangeCount(.changeReadOtherContents) }
         }
         // Recovery contents differ from the original file by design. Compare
-        // subsequent saves against the original as it exists when reopening.
-        if let url, let original = try? Self.boundedData(from: url) {
-            ioState.setBaseline(SHA256.hash(data: original))
-        } else { ioState.setBaseline(nil) }
+        // later saves against the original as it was when the draft was
+        // autosaved, so changes made while Gonzo was closed are not overwritten.
+        // Older drafts fall back to the original as it exists when reopening;
+        // an original that exists but cannot be read must not be overwritten.
+        guard let url else { ioState.setBaseline(nil); return }
+        let recorded = url == contentsURL ? nil : Self.recordedBaseline(of: contentsURL)
+        do {
+            let current = Self.digest(try Self.boundedData(from: url))
+            ioState.setBaseline(recorded ?? current)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            ioState.setBaselines(conflict: nil, recorded: recorded)
+        } catch {
+            ioState.setBaselines(conflict: Self.unmatchableBaseline, recorded: recorded)
+        }
     }
 
     override func makeWindowControllers() {
@@ -126,7 +145,19 @@ final class GonzoDocument: NSDocument {
     override nonisolated func read(from url: URL, ofType typeName: String) throws {
         let data = try Self.boundedData(from: url)
         try read(from: data, ofType: typeName)
-        ioState.setBaseline(SHA256.hash(data: data))
+        ioState.setBaseline(Self.digest(data))
+    }
+
+    private nonisolated static let baselineAttribute = "se.henriksjokvist.Gonzo.baseline"
+    // No file content hashes to this, so an unreadable original stays protected.
+    private nonisolated static let unmatchableBaseline = Data(repeating: 0, count: 31)
+
+    private nonisolated static func digest(_ data: Data) -> Data { Data(SHA256.hash(data: data)) }
+
+    private nonisolated static func recordedBaseline(of draft: URL) -> Data? {
+        var bytes = [UInt8](repeating: 0, count: SHA256.byteCount)
+        let count = getxattr(draft.path, baselineAttribute, &bytes, bytes.count, 0, 0)
+        return count == SHA256.byteCount ? Data(bytes) : nil
     }
 
     private nonisolated static func boundedData(from url: URL) throws -> Data {
@@ -168,6 +199,9 @@ final class GonzoDocument: NSDocument {
         if text.hasPrefix("\u{FEFF}") { text.removeFirst() }
         let prepared = EditorStorage.Prepared(text)
         if Thread.isMainThread {
+            // A newer read replaces any result a concurrent open staged but never
+            // installed, so storage and the conflict baseline describe one file.
+            _ = ioState.takePrepared()
             MainActor.assumeIsolated {
                 editorStorage.load(prepared, attributes: editorController?.baseAttributes
                                    ?? MarkdownHighlighter.baseAttributes(fontSize: MarkdownHighlighter.defaultFontSize))
@@ -199,7 +233,7 @@ final class GonzoDocument: NSDocument {
     override nonisolated func write(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType, originalContentsURL: URL?) throws {
         if saveOperation == .saveOperation || saveOperation == .autosaveInPlaceOperation,
            let digest = ioState.baseline(), let originalContentsURL {
-            guard SHA256.hash(data: try Self.boundedData(from: originalContentsURL)) == digest else {
+            guard Self.digest(try Self.boundedData(from: originalContentsURL)) == digest else {
                 throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteFileExistsError, userInfo: [
                     NSLocalizedDescriptionKey: "The file changed outside Gonzo. Your edits have not overwritten it.",
                     NSLocalizedRecoverySuggestionErrorKey: "Use Save As to keep your edits in another file, or Revert to Saved to load the external changes."
@@ -213,6 +247,10 @@ final class GonzoDocument: NSDocument {
         let text: String
         if !Thread.isMainThread, let pending = ioState.takeSave() { text = pending }
         else { text = onMain { self.saveSnapshot() } }
+        // The text is an immutable snapshot, so editing can resume before the
+        // UTF-8 conversion, which takes tens of milliseconds for large
+        // non-ASCII documents.
+        unblockUserInteraction()
         let snapshot = Data(text.utf8)
         let dictionary = Thread.current.threadDictionary
         let previous = dictionary[snapshotKey]
@@ -221,12 +259,16 @@ final class GonzoDocument: NSDocument {
             if let previous { dictionary[snapshotKey] = previous }
             else { dictionary.removeObject(forKey: snapshotKey) }
         }
-        unblockUserInteraction()
         try super.writeSafely(to: url, ofType: typeName, for: saveOperation)
         if saveOperation != .saveToOperation && saveOperation != .autosaveElsewhereOperation {
             // Hash exactly the bytes that were saved, even if editing resumed
             // while the snapshot was being written. No second serialization.
-            ioState.setBaseline(SHA256.hash(data: snapshot))
+            ioState.setBaseline(Self.digest(snapshot))
+        }
+        if saveOperation == .autosaveElsewhereOperation, let baseline = ioState.recordedBaseline() {
+            // A draft saved apart from its original remembers the original it
+            // was based on, for recovery after a relaunch.
+            _ = baseline.withUnsafeBytes { setxattr(url.path, Self.baselineAttribute, $0.baseAddress, $0.count, 0, 0) }
         }
     }
 

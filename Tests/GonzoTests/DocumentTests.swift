@@ -223,6 +223,52 @@ struct DocumentTests {
         #expect(try String(contentsOf: original, encoding: .utf8) == "Recovered story 東京")
     }
 
+    @Test func recoveredDraftDoesNotOverwriteChangesMadeWhileClosed() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = directory.appendingPathComponent("original.md")
+        let draft = directory.appendingPathComponent("draft.md")
+        try Data("Original".utf8).write(to: original)
+        let document = try GonzoDocument(contentsOf: original, ofType: "net.daringfireball.markdown")
+        document.storage.replaceCharacters(in: NSRange(location: 0, length: document.storage.length), with: "Draft")
+        try document.writeSafely(to: draft, ofType: "net.daringfireball.markdown", for: .autosaveElsewhereOperation)
+        document.close()
+        // Another app changes the original while Gonzo is not running.
+        try Data("Changed while closed".utf8).write(to: original)
+        let restored = try GonzoDocument(for: original, withContentsOf: draft, ofType: "net.daringfireball.markdown")
+        Self.documents.addDocument(restored)
+        defer { restored.close() }
+        #expect(restored.storage.string == "Draft")
+        // After a relaunch AppKit's modification date baseline already matches
+        // the changed original, so only the recorded content baseline can tell.
+        func matchModificationDate(_ document: GonzoDocument) throws {
+            document.fileModificationDate = try original.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        }
+        try matchModificationDate(restored)
+        await #expect(throws: (any Error).self) { try await save(restored, to: original, operation: .saveOperation) }
+        #expect(try String(contentsOf: original, encoding: .utf8) == "Changed while closed")
+        #expect(restored.isDocumentEdited)
+        // An original that can no longer be read is not overwritten either.
+        try Data(count: GonzoDocument.maximumFileBytes + 1).write(to: original)
+        let oversized = try GonzoDocument(for: original, withContentsOf: draft, ofType: "net.daringfireball.markdown")
+        Self.documents.addDocument(oversized)
+        defer { oversized.close() }
+        try matchModificationDate(oversized)
+        await #expect(throws: (any Error).self) { try await save(oversized, to: original, operation: .saveOperation) }
+        #expect(try FileManager.default.attributesOfItem(atPath: original.path)[.size] as? Int == GonzoDocument.maximumFileBytes + 1)
+        // Autosaving the draft again while the original is unreadable keeps the
+        // recorded baseline, so a later relaunch still detects other changes.
+        try oversized.writeSafely(to: draft, ofType: "net.daringfireball.markdown", for: .autosaveElsewhereOperation)
+        try Data("Changed again".utf8).write(to: original)
+        let relaunched = try GonzoDocument(for: original, withContentsOf: draft, ofType: "net.daringfireball.markdown")
+        Self.documents.addDocument(relaunched)
+        defer { relaunched.close() }
+        try matchModificationDate(relaunched)
+        await #expect(throws: (any Error).self) { try await save(relaunched, to: original, operation: .saveOperation) }
+        #expect(try String(contentsOf: original, encoding: .utf8) == "Changed again")
+    }
+
     @Test func externalChangesAreNotOverwrittenAndSaveFailureRetainsEdits() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -407,6 +453,51 @@ struct DocumentTests {
         storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) { _, _, _ in }
         #expect(storage.attributedSubstring(from: NSRange(location: 0, length: storage.length)).isEqual(to: reference))
         #expect(storage.string == text)
+    }
+
+    @Test func objectiveCStringReadsTheCurrentTextWithoutASwiftRoundTrip() throws {
+        let storage = EditorStorage()
+        storage.load(EditorStorage.Prepared("東京 🦇 story"), attributes: MarkdownHighlighter.baseAttributes(fontSize: 13))
+        // AppKit reads -string through Objective-C on every edit.
+        func objectiveCString() -> String? {
+            (storage.perform(#selector(getter: NSAttributedString.string))?.takeUnretainedValue() as? NSString) as String?
+        }
+        #expect(objectiveCString() == "東京 🦇 story")
+        // Background readers such as the find bar keep what they fetched: it
+        // must be an immutable snapshot, unchanged by later edits.
+        let kept = storage.perform(#selector(getter: NSAttributedString.string))?.takeUnretainedValue() as? NSString
+        #expect(kept?.isKind(of: NSMutableString.self) == false || kept?.copy() as AnyObject? === kept)
+        storage.replaceCharacters(in: NSRange(location: 2, length: 0), with: "の夜")
+        #expect(objectiveCString() == "東京の夜 🦇 story")
+        #expect(kept as String? == "東京 🦇 story")
+        #expect(storage.string == objectiveCString())
+        storage.load(EditorStorage.Prepared("Reverted"), attributes: MarkdownHighlighter.baseAttributes(fontSize: 13))
+        #expect(objectiveCString() == "Reverted")
+        #expect(storage.string == "Reverted")
+    }
+
+    @Test func backgroundStringReadersNeverTouchTheMutableStore() async throws {
+        let storage = EditorStorage()
+        storage.load(EditorStorage.Prepared(String(repeating: "東京 🦇 story\n", count: 20_000)),
+                     attributes: MarkdownHighlighter.baseAttributes(fontSize: 13))
+        _ = storage.perform(#selector(getter: NSAttributedString.string))
+        // The find bar reads -string on a worker thread while the main thread edits.
+        nonisolated(unsafe) let reading = storage
+        let reader = Task.detached {
+            var lengths = 0
+            for _ in 0..<2_000 {
+                let text = reading.perform(#selector(getter: NSAttributedString.string))!.takeUnretainedValue() as! NSString
+                lengths &+= text.length
+                _ = text.substring(with: NSRange(location: text.length / 2, length: 4))
+            }
+            return lengths
+        }
+        for index in 0..<2_000 {
+            storage.replaceCharacters(in: NSRange(location: index % 1000, length: 0), with: "の")
+            _ = storage.perform(#selector(getter: NSAttributedString.string))
+        }
+        #expect(await reader.value > 0)
+        #expect(storage.length == 20_000 * 12 + 2_000)
     }
 
     @Test func deferredAttributeFixingFixesReadParagraphsAndClipsRuns() throws {
@@ -624,6 +715,21 @@ struct DocumentTests {
             try await save(document, to: try #require(document.fileURL), operation: .saveOperation)
         }
         #expect(try String(contentsOf: target, encoding: .utf8) == "External")
+    }
+
+    @Test func revertWinsOverAStaleBackgroundRead() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data("old".utf8).write(to: url)
+        let document = GonzoDocument()
+        // A concurrent open reads off the main thread and stages its prepared
+        // text until storage is first used, as AppKit's opening queue does.
+        nonisolated(unsafe) let opening = document
+        try await Task.detached { try opening.read(from: url, ofType: "net.daringfireball.markdown") }.value
+        try Data("new".utf8).write(to: url)
+        try document.revert(toContentsOf: url, ofType: "net.daringfireball.markdown")
+        // The reverted text, not the stale staged read, must reach the editor.
+        #expect(document.storage.string == "new")
     }
 
     @Test func typingAfterSaveAndAutosaveStaysDirtyAndUndoesSeparately() async throws {

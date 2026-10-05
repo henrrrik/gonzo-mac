@@ -3,8 +3,9 @@ import GonzoCore
 
 final class EditorStorage: NSTextStorage {
     private let backing = NSMutableAttributedString(string: "")
-    // TextKit can ask for string thousands of times per layout pass. Bridge
-    // once per text edit rather than copying the full source on every call.
+    // The owner's Swift view of the text (save snapshots, printing), bridged
+    // from the immutable snapshot once per edit. AppKit reads -string through
+    // the replaced Objective-C getter below instead.
     private var cachedText: String?
     private var metrics = TextMetrics()
     var wordCount: Int { metrics.wordCount }
@@ -31,6 +32,7 @@ final class EditorStorage: NSTextStorage {
         let oldLength = length
         beginEditing()
         cachedText = prepared.text
+        snapshotIsCurrent = false
         backing.setAttributedString(NSAttributedString(string: prepared.text, attributes: attributes))
         unfixed.removeAll()
         lastWindowEnd = nil
@@ -46,10 +48,53 @@ final class EditorStorage: NSTextStorage {
     var source: NSString { backing.mutableString }
     func paragraphRange(covering range: NSRange) -> NSRange { metrics.paragraphRange(in: source, covering: range) }
 
+    // AppKit reads -string on every edit (layout invalidation, input methods),
+    // and the find bar reads it on a background thread. A Swift String getter
+    // would bridge the whole store, transcoding non-ASCII text to UTF-8 and
+    // indexing it back to UTF-16, on every keystroke; the live mutable store
+    // would race background readers. Objective-C callers get an immutable copy
+    // of the underlying CFString instead, a plain memory copy. Only the owner
+    // builds it (the main thread for AppKit), once per batch of edits when first
+    // read; other threads take the last published snapshot under a lock and
+    // never touch the store.
+    private static let objectiveCStringGetter: Void = {
+        let getter: @convention(block) (EditorStorage) -> NSString = { $0.objectiveCString }
+        let selector = #selector(getter: NSAttributedString.string)
+        class_replaceMethod(EditorStorage.self, selector, imp_implementationWithBlock(getter), "@@:")
+    }()
+    private let snapshotLock = NSLock()
+    private nonisolated(unsafe) var publishedSnapshot: NSString = ""
+    // Owner only: whether the published snapshot matches the store.
+    private var snapshotIsCurrent = false
+    private var objectiveCString: NSString {
+        guard Thread.isMainThread else {
+            snapshotLock.lock(); defer { snapshotLock.unlock() }
+            return publishedSnapshot
+        }
+        return currentSnapshot
+    }
+    // The storage's owner rebuilds a stale snapshot; called from the main
+    // thread for AppKit, and by the Swift getter that only the owner uses.
+    private var currentSnapshot: NSString {
+        if !snapshotIsCurrent {
+            // The backing store's own -string, not its mutableString proxy,
+            // whose copies go character by character.
+            let backingString = backing.perform(#selector(getter: NSAttributedString.string))!.takeUnretainedValue() as! NSString
+            let snapshot = backingString.copy() as! NSString
+            snapshotLock.lock(); publishedSnapshot = snapshot; snapshotLock.unlock()
+            snapshotIsCurrent = true
+        }
+        return publishedSnapshot
+    }
+    // Installed once, the first time any storage is initialized.
+    private let installsObjectiveCStringGetter: Void = EditorStorage.objectiveCStringGetter
+
     override var length: Int { backing.length }
     override var string: String {
         if let cachedText { return cachedText }
-        let text = backing.string
+        // Bridge the immutable UTF-16 snapshot AppKit already reads, rather
+        // than converting the whole store on the main thread at save time.
+        let text = currentSnapshot as String
         cachedText = text
         return text
     }
@@ -189,6 +234,7 @@ final class EditorStorage: NSTextStorage {
         utf8Count += str.utf8.count - source.substring(with: range).utf8.count
         beginEditing()
         cachedText = nil
+        snapshotIsCurrent = false
         backing.replaceCharacters(in: range, with: str)
         // Keep pending fixes aligned with the text; processEditing marks the
         // inserted characters through fixAttributes(in:).
