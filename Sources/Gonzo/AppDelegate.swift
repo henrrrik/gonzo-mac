@@ -4,6 +4,15 @@ import AppKit
 final class GonzoDocumentController: NSDocumentController {
     override nonisolated func documentClass(forType typeName: String) -> AnyClass? { GonzoDocument.self }
     override var defaultType: String? { "net.daringfireball.markdown" }
+
+    // Open a symlinked document as its target, so its file URL, safe saves,
+    // recents and the external-change baseline all describe the real file.
+    // Safe saves cannot replace a file through a symlink.
+    override func openDocument(withContentsOf url: URL, display displayDocument: Bool,
+                               completionHandler: @escaping (NSDocument?, Bool, (any Error)?) -> Void) {
+        super.openDocument(withContentsOf: url.isFileURL ? url.resolvingSymlinksInPath() : url,
+                           display: displayDocument, completionHandler: completionHandler)
+    }
 }
 
 @MainActor

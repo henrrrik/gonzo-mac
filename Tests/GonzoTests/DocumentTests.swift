@@ -572,6 +572,60 @@ struct DocumentTests {
         #expect(!document.isDocumentEdited)
     }
 
+    @Test func openingFollowsSymlinksButRejectsSpecialFilesWithoutBlocking() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = directory.appendingPathComponent("notes.md")
+        try Data("# Linked 東京".utf8).write(to: target)
+        let link = directory.appendingPathComponent("link.md")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        let document = GonzoDocument()
+        try document.read(from: link, ofType: "net.daringfireball.markdown")
+        #expect(document.storage.string == "# Linked 東京")
+        // A FIFO with no writer would block a plain open forever.
+        let fifo = directory.appendingPathComponent("pipe.md")
+        #expect(mkfifo(fifo.path, 0o600) == 0)
+        let fifoLink = directory.appendingPathComponent("pipe-link.md")
+        try FileManager.default.createSymbolicLink(at: fifoLink, withDestinationURL: fifo)
+        for url in [fifo, fifoLink, directory] {
+            #expect(throws: (any Error).self) { try GonzoDocument().read(from: url, ofType: "net.daringfireball.markdown") }
+        }
+        #expect(document.storage.string == "# Linked 東京")
+    }
+
+    @Test func documentOpenedThroughSymlinkSavesToItsTarget() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = directory.appendingPathComponent("notes.md")
+        try Data("Original".utf8).write(to: target)
+        let link = directory.appendingPathComponent("link.md")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        let opened = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NSDocument, Error>) in
+            Self.documents.openDocument(withContentsOf: link, display: false) { document, _, error in
+                if let document { continuation.resume(returning: document) }
+                else { continuation.resume(throwing: error ?? CocoaError(.fileReadUnknown)) }
+            }
+        }
+        let document = try #require(opened as? GonzoDocument)
+        defer { document.close() }
+        document.storage.replaceCharacters(in: NSRange(location: 0, length: document.storage.length), with: "Edited")
+        document.updateChangeCount(.changeDone)
+        try await save(document, to: try #require(document.fileURL), operation: .saveOperation)
+        #expect(!document.isDocumentEdited)
+        #expect(try String(contentsOf: target, encoding: .utf8) == "Edited")
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == target.path)
+        // The conflict check still guards the target against external changes.
+        try Data("External".utf8).write(to: target)
+        document.storage.replaceCharacters(in: NSRange(location: 0, length: document.storage.length), with: "Mine")
+        document.updateChangeCount(.changeDone)
+        await #expect(throws: (any Error).self) {
+            try await save(document, to: try #require(document.fileURL), operation: .saveOperation)
+        }
+        #expect(try String(contentsOf: target, encoding: .utf8) == "External")
+    }
+
     @Test func typingAfterSaveAndAutosaveStaysDirtyAndUndoesSeparately() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
         defer { try? FileManager.default.removeItem(at: url) }

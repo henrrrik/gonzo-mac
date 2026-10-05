@@ -8,7 +8,7 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Show pinned toolchain
@@ -25,3 +25,5 @@ jobs:
           codesign -d --entitlements :- build/Gonzo.app > /tmp/gonzo-entitlements.plist 2>/dev/null
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' /tmp/gonzo-entitlements.plist)" = true
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.files.user-selected.read-write' /tmp/gonzo-entitlements.plist)" = true
+          # Exactly these two entitlements: no network or other access.
+          test "$(/usr/libexec/PlistBuddy -c 'Print' /tmp/gonzo-entitlements.plist | grep -c ' = ')" -eq 2

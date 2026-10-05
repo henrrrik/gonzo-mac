@@ -38,6 +38,19 @@ import Testing
     #expect(result.replacement == "\n")
 }
 
+@Test func returnRightAfterListMarkerKeepsTheItem() {
+    // Only an item that is empty on both sides of the caret exits the list.
+    let text = "- item" as NSString
+    let result = EditorCommands.newline(text, selection: NSRange(location: 2, length: 0), soft: false)
+    #expect(result.range == NSRange(location: 2, length: 0))
+    #expect(result.replacement == "\n- ")
+    let middle = EditorCommands.newline(text, selection: NSRange(location: 4, length: 0), soft: false)
+    #expect(middle.replacement == "\n- ")
+    let blank = EditorCommands.newline("- \n", selection: NSRange(location: 2, length: 0), soft: false)
+    #expect(blank.range == NSRange(location: 0, length: 2))
+    #expect(blank.replacement == "\n")
+}
+
 @Test func newlineNormalization() {
     #expect(EditorCommands.normalize("a\r\nb\rc") == "a\nb\nc")
 }

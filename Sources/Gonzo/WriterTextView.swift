@@ -80,12 +80,16 @@ final class WriterTextView: NSTextView {
             bytes += replacement.utf8.count - source.substring(with: range).utf8.count
         }
         if bytes > GonzoDocument.maximumFileBytes {
-            if let window {
-                NSAlert(error: GonzoDocument.oversizedFileError).beginSheetModal(for: window)
-            } else { NSSound.beep() }
+            presentOversized()
             return false
         }
         return true
+    }
+
+    private func presentOversized() {
+        if let window {
+            NSAlert(error: GonzoDocument.oversizedFileError).beginSheetModal(for: window)
+        } else { NSSound.beep() }
     }
 
     func apply(_ mutation: TextMutation, name: String) {
@@ -101,17 +105,27 @@ final class WriterTextView: NSTextView {
     @objc func markdownItalic(_ sender: Any?) { apply(EditorCommands.wrap(source, selection: selectedRange(), marker: "*"), name: "Italic") }
     @objc func markdownLink(_ sender: Any?) { apply(EditorCommands.link(source, selection: selectedRange(), destination: clipboardURL), name: "Link") }
 
-    private var clipboardURL: String? {
-        guard let text = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let url = URL(string: text), let scheme = url.scheme?.lowercased(),
+    private var clipboardURL: String? { NSPasteboard.general.string(forType: .string).flatMap(Self.linkDestination) }
+
+    private static func linkDestination(_ text: String) -> String? {
+        guard (text as NSString).length <= 2048 else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
               ["https", "http", "mailto"].contains(scheme) else { return nil }
-        return text
+        return trimmed
     }
 
     override func paste(_ sender: Any?) {
-        if selectedRange().length > 0, let destination = clipboardURL {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        // Each UTF-16 unit is at least one UTF-8 byte. Reject oversized text
+        // before trimming, normalizing or counting bytes copies it again.
+        guard (text as NSString).length <= GonzoDocument.maximumFileBytes else {
+            presentOversized()
+            return
+        }
+        if selectedRange().length > 0, let destination = Self.linkDestination(text) {
             apply(EditorCommands.link(source, selection: selectedRange(), destination: destination), name: "Paste Link")
-        } else if let text = NSPasteboard.general.string(forType: .string) {
+        } else {
             insertText(EditorCommands.normalize(text), replacementRange: selectedRange())
         }
     }

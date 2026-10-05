@@ -161,7 +161,13 @@ public enum EditorCommands {
                                                     length: min(4096, selection.location - paragraph.location)))
             if let match = list.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) {
                 let source = line as NSString
-                if match.range(at: 3).length == 0, selection.location - paragraph.location <= 4096 {
+                // An item is empty only when nothing but whitespace follows the
+                // caret too; Return right after a marker must keep the item text.
+                let restStart = NSMaxRange(selection)
+                let rest = text.substring(with: NSRange(location: restStart,
+                                                        length: min(4096, max(0, NSMaxRange(paragraph) - restStart))))
+                let emptyAfter = rest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if match.range(at: 3).length == 0, emptyAfter, selection.location - paragraph.location <= 4096 {
                     range = NSRange(location: paragraph.location, length: NSMaxRange(selection) - paragraph.location)
                     insertion = "\n"
                 } else {

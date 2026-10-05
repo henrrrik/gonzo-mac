@@ -130,12 +130,26 @@ final class GonzoDocument: NSDocument {
     }
 
     private nonisolated static func boundedData(from url: URL) throws -> Data {
-        guard url.isFileURL, try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
-            throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnsupportedSchemeError,
-                          userInfo: [NSLocalizedDescriptionKey: "Gonzo opens regular local files."])
+        let unsupported = NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnsupportedSchemeError,
+                                  userInfo: [NSLocalizedDescriptionKey: "Gonzo opens regular local files."])
+        guard url.isFileURL else { throw unsupported }
+        // Follow a symlink the user chose, then open without following another
+        // link and without blocking, so a path swapped for a FIFO or device after
+        // resolution cannot hang the read. fstat confirms the opened file.
+        let path = url.resolvingSymlinksInPath().path
+        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            let code = errno
+            switch code {
+            case ENOENT: throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: path])
+            case EACCES, EPERM: throw CocoaError(.fileReadNoPermission, userInfo: [NSFilePathErrorKey: path])
+            default: throw unsupported
+            }
         }
-        let file = try FileHandle(forReadingFrom: url)
-        defer { try? file.close() }
+        let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { throw unsupported }
+        _ = fcntl(descriptor, F_SETFL, fcntl(descriptor, F_GETFL) & ~O_NONBLOCK)
         var data = Data()
         // Bound actual bytes read, including files that grow after opening.
         while let chunk = try file.read(upToCount: min(256 * 1024, Self.maximumFileBytes + 1 - data.count)), !chunk.isEmpty {
