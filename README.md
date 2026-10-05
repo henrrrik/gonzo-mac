@@ -11,11 +11,15 @@ make build
 open build/Gonzo.app
 # Optional: install in /Applications
 make install
+# Optional: package build/Gonzo-<version>.dmg for distribution
+make dmg
 ```
 
 The release app is built for the host architecture, signed locally, and uses App Sandbox and Hardened Runtime. It can read and write files you select; it has no network entitlement. Copy it to Applications if desired. Distribution to other Macs requires Developer ID signing and notarization; set `GONZO_SIGNING_IDENTITY` to choose a signing identity. `make debug` builds a development app; `make test` runs the tests.
 
-Builds and installations stage and verify a new bundle before replacing the old one. Previous bundles remain in hidden staging folders so running instances keep their original executable. Restart Gonzo to use an update; remove these folders only after those instances have exited.
+Builds and installations stage and verify a new bundle before replacing the old one. Previous bundles remain in hidden staging folders so running instances keep their original executable; later runs remove them once nothing can still be running them. Restart Gonzo to use an update.
+
+`make dmg` packages the verified app with an Applications shortcut, mounts the image to check the packaged app's signature, Hardened Runtime and entitlements, and prints its SHA-256. The image is unsigned and the app is not notarized, so when a browser or AirDrop marks the download as quarantined, Gatekeeper blocks the app on other Macs; recipients should compare the image's SHA-256 with one received over a trusted channel before running `xattr -dr com.apple.quarantine /Applications/Gonzo.app` after copying the app.
 
 ## Writing
 
