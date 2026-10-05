@@ -52,7 +52,10 @@ final class GonzoDocument: NSDocument {
     private nonisolated let ioState = DocumentIOState()
     private nonisolated let snapshotKey = "Gonzo.SaveSnapshot." + UUID().uuidString
     var storage: EditorStorage {
-        if let prepared = ioState.takePrepared() { editorStorage.load(prepared) }
+        // Windows open at the default size; the first window adopts this text.
+        if let prepared = ioState.takePrepared() {
+            editorStorage.load(prepared, attributes: MarkdownHighlighter.baseAttributes(fontSize: MarkdownHighlighter.defaultFontSize))
+        }
         return editorStorage
     }
     private var editorController: EditorWindowController? { windowControllers.first as? EditorWindowController }
@@ -152,7 +155,8 @@ final class GonzoDocument: NSDocument {
         let prepared = EditorStorage.Prepared(text)
         if Thread.isMainThread {
             MainActor.assumeIsolated {
-                editorStorage.load(prepared)
+                editorStorage.load(prepared, attributes: editorController?.baseAttributes
+                                   ?? MarkdownHighlighter.baseAttributes(fontSize: MarkdownHighlighter.defaultFontSize))
                 editorController?.reloadFromDocument()
             }
         } else {

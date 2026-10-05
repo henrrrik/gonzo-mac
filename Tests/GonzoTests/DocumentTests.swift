@@ -271,6 +271,174 @@ struct DocumentTests {
         #expect(storage.utf8Count == 0)
     }
 
+    @Test func editsAndTextSizeStyleTheViewportAndScrolledInText() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let controller = try #require(document.windowControllers.first as? EditorWindowController)
+        let view = controller.textView
+        let storage = document.storage
+        let layout = try #require(view.layoutManager)
+        let container = try #require(view.textContainer)
+        func size(at location: Int) -> CGFloat? {
+            (storage.attribute(.font, at: location, effectiveRange: nil) as? NSFont)?.pointSize
+        }
+        func expectViewportStyled(heading: CGFloat, body: CGFloat) {
+            let glyphs = layout.glyphRange(forBoundingRect: view.visibleRect, in: container)
+            let visible = layout.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+            let source = storage.source
+            source.enumerateSubstrings(in: visible, options: .byParagraphs) { paragraph, range, _, _ in
+                guard let paragraph, !paragraph.isEmpty else { return }
+                let expected = paragraph.hasPrefix("# ") ? heading : body
+                #expect(size(at: range.location + range.length - 1) == expected, "\(paragraph)")
+            }
+        }
+        // A bulk paste styles what is in view; the far end is styled once scrolled to.
+        view.insertText(String(repeating: "# Heading\n\nBody text\n\n", count: 2000), replacementRange: NSRange(location: 0, length: 0))
+        let last = storage.source.range(of: "# Heading", options: .backwards).location
+        view.scrollRangeToVisible(NSRange(location: last, length: 0))
+        expectViewportStyled(heading: 13 * 1.75, body: 13)
+        // One change replacing several ranges, as Replace All does, restyles each.
+        // Mid-document, so shrinking headings cannot move the viewport and
+        // trigger a full viewport refresh that would mask a missed range.
+        let first = storage.source.range(of: "# Heading", range: NSRange(location: storage.length / 2, length: storage.length / 2)).location
+        let second = storage.source.range(of: "# Heading", range: NSRange(location: first + 1, length: storage.length - first - 1)).location
+        view.scrollRangeToVisible(NSRange(location: second, length: 0))
+        let ranges = [NSRange(location: first, length: 2), NSRange(location: second, length: 2)]
+        #expect(view.shouldChangeText(inRanges: ranges.map { NSValue(range: $0) }, replacementStrings: ["", ""]))
+        storage.beginEditing()
+        for range in ranges.reversed() { storage.replaceCharacters(in: range, with: "") }
+        storage.endEditing()
+        view.didChangeText()
+        #expect(size(at: first) == 13)
+        #expect(size(at: second - 2) == 13)
+        // A smaller text size brings more text into view; all of it is restyled.
+        for _ in 0..<19 { controller.biggerText(nil) }
+        controller.resetTextSize(nil)
+        expectViewportStyled(heading: 13 * 1.75, body: 13)
+    }
+
+    @Test func revertGivesOffscreenTextTheEditorFontAndColor() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(String(repeating: "A paragraph of body text.\n\n", count: 5000).utf8).write(to: url)
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let controller = try #require(document.windowControllers.first as? EditorWindowController)
+        controller.biggerText(nil)
+        try document.revert(toContentsOf: url, ofType: "net.daringfireball.markdown")
+        // Unstyled text would lay out in a default font, shifting heights while
+        // scrolling, and draw without a color that follows the appearance.
+        let end = document.storage.length - 1
+        let font = document.storage.attribute(.font, at: end, effectiveRange: nil) as? NSFont
+        #expect(font?.pointSize == 14)
+        #expect(font?.isFixedPitch == true)
+        #expect(document.storage.attribute(.foregroundColor, at: end, effectiveRange: nil) as? NSColor == .textColor)
+    }
+
+    @Test func restylingUnchangedFallbackTextMakesNoAttributeEdits() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let controller = try #require(document.windowControllers.first as? EditorWindowController)
+        let text = "# 東京 🦇 heading\n\n**太字** and *斜体* with مرحبا\n\n> 引用 ✍️\n\n`コード` [リンク](https://example.com)\n"
+        controller.textView.insertText(text, replacementRange: NSRange(location: 0, length: 0))
+        final class Counter: NSObject, NSTextStorageDelegate {
+            var attributeEdits = 0
+            func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
+                             range: NSRange, changeInLength delta: Int) {
+                if editedMask.contains(.editedAttributes) { attributeEdits += 1 }
+            }
+        }
+        // The fallback font chosen while typing can be a distinct, unequal
+        // object for the same face as the one chosen for the restyled copy;
+        // let one restyle settle that, then every restyle must find the
+        // paragraphs equal rather than rewriting and refixing their fonts.
+        controller.reloadFromDocument()
+        let counter = Counter()
+        document.storage.delegate = counter
+        defer { document.storage.delegate = nil }
+        controller.reloadFromDocument()
+        controller.reloadFromDocument()
+        #expect(counter.attributeEdits == 0)
+        #expect(document.storage.string == text)
+    }
+
+    @Test func readingUpwardFromTheEndMatchesEagerFixing() throws {
+        let paragraph = "## 東京の夜\n\nFear and loathing 🦇 in 東京, **café** and *naïve* prose ✍️.\n\n"
+        let text = String(repeating: paragraph, count: 2000)
+        let attributes = MarkdownHighlighter.baseAttributes(fontSize: 13)
+        let storage = EditorStorage()
+        storage.load(EditorStorage.Prepared(text), attributes: attributes)
+        let reference = NSTextStorage(string: text, attributes: attributes)
+        reference.fixAttributes(in: NSRange(location: 0, length: reference.length))
+        // Read the end first, then step upward: each read fixes a base window
+        // below or around unfixed text. Fonts must match eager fixing, and a
+        // reported run must not extend over text whose fonts differ.
+        for location in stride(from: storage.length - 1, through: 0, by: -3001) {
+            var run = NSRange()
+            let font = storage.attribute(.font, at: location, effectiveRange: &run) as? NSFont
+            #expect(NSLocationInRange(location, run))
+            for edge in [run.location, NSMaxRange(run) - 1] {
+                #expect(font?.fontName == (reference.attribute(.font, at: edge, effectiveRange: nil) as? NSFont)?.fontName)
+            }
+        }
+        for location in stride(from: 0, to: storage.length, by: 7) {
+            let font = storage.attribute(.font, at: location, effectiveRange: nil) as? NSFont
+            let expected = reference.attribute(.font, at: location, effectiveRange: nil) as? NSFont
+            if font?.fontName != expected?.fontName {
+                Issue.record("Font differs at \(location)")
+                break
+            }
+        }
+        #expect(storage.string == text)
+    }
+
+    @Test func fixingALongParagraphAboveFixedTextMatchesEagerFixing() throws {
+        // A long single-line paragraph above text that was already read is
+        // fixed in one large call; it must equal fixing everything up front.
+        let text = String(repeating: "Line of text\n", count: 3000)
+            + String(repeating: "a東🦇b", count: 20_000) + "\n"
+            + String(repeating: "x東 🦇 y\n", count: 8000)
+        let attributes = MarkdownHighlighter.baseAttributes(fontSize: 13)
+        let storage = EditorStorage()
+        storage.load(EditorStorage.Prepared(text), attributes: attributes)
+        let reference = NSMutableAttributedString(string: text, attributes: attributes)
+        reference.fixAttributes(in: NSRange(location: 0, length: reference.length))
+        storage.enumerateAttributes(in: NSRange(location: 140_000, length: storage.length - 140_000)) { _, _, _ in }
+        storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) { _, _, _ in }
+        #expect(storage.attributedSubstring(from: NSRange(location: 0, length: storage.length)).isEqual(to: reference))
+        #expect(storage.string == text)
+    }
+
+    @Test func deferredAttributeFixingFixesReadParagraphsAndClipsRuns() throws {
+        let storage = EditorStorage()
+        // Filler wider than one fix window keeps the CJK paragraph pending
+        // after the first read.
+        let text = "Plain words\n" + String(repeating: "Filler line\n", count: 3000) + "東京 🦇 text\nMore plain words"
+        storage.load(EditorStorage.Prepared(text), attributes: MarkdownHighlighter.baseAttributes(fontSize: 13))
+        let revision = storage.revision
+        func expectDrawable(_ word: String) throws {
+            let source = storage.source
+            let location = source.range(of: word).location
+            let font = try #require(storage.attribute(.font, at: location, effectiveRange: nil) as? NSFont)
+            var unit = source.character(at: location)
+            var glyph = CGGlyph()
+            #expect(CTFontGetGlyphsForCharacters(font, &unit, &glyph, 1))
+        }
+        // A run read from fixed text must not extend over text not yet fixed,
+        // or layout would draw that text with fonts that lack its glyphs.
+        var run = NSRange()
+        _ = storage.attributes(at: 0, effectiveRange: &run)
+        #expect(NSMaxRange(run) <= (text as NSString).range(of: "東京").location)
+        try expectDrawable("東京")
+        // Pending fixes follow edits made before and inside unfixed text.
+        storage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "Intro 大阪\n")
+        storage.replaceCharacters(in: NSRange(location: storage.length, length: 0), with: "\n京都")
+        try expectDrawable("大阪")
+        try expectDrawable("京都")
+        #expect(storage.string == "Intro 大阪\n" + text + "\n京都")
+        #expect(storage.revision == revision + 2)
+    }
+
     @Test func headingHierarchyPreservesSourceAndResetsAfterEditing() throws {
         let document = GonzoDocument()
         let source = "# Title\n\n## A *subtitle*\n\n### Section\n\n#### Topic\n\n##### Detail\n\n###### Label\n\nBody text"

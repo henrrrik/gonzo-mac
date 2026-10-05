@@ -16,12 +16,14 @@ struct PerformanceTests {
         }
         if result == KERN_SUCCESS { print("REVIEW footprint \(label): \(Double(info.phys_footprint) / 1048576) MiB") }
     }
-    private func measure(_ label: String, _ work: () throws -> Void) rethrows {
+    @discardableResult
+    private func measure<Result>(_ label: String, _ work: () throws -> Result) rethrows -> Result {
         let start = ContinuousClock.now
-        try work()
+        let result = try work()
         let d = start.duration(to: .now).components
         let milliseconds = Double(d.seconds) * 1000 + Double(d.attoseconds) / 1e15
         print("REVIEW \(label): \(milliseconds) ms")
+        return result
     }
 
     @Test func editorWorkloads() throws {
@@ -160,6 +162,109 @@ struct PerformanceTests {
                     }
                 }
                 #expect(document.storage.length == (text as NSString).length + 20)
+            }
+        }
+    }
+
+    // Whole-document paths: installing text, opening a window, text size changes,
+    // reverting and bulk pastes, each ending with a display of the viewport.
+    @Test func nonASCIIDocumentLifecycleBenchmark() throws {
+        _ = NSApplication.shared
+        let paragraph = "## 東京の夜\n\nFear and loathing 🦇 in 東京, **café** and *naïve* prose ✍️.\n\n"
+        for repetitions in [1_000, 10_000] {
+            let text = String(repeating: paragraph, count: repetitions)
+            let bytes = text.utf8.count
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+            defer { try? FileManager.default.removeItem(at: url) }
+            try Data(text.utf8).write(to: url)
+            try autoreleasepool {
+                let document = GonzoDocument()
+                defer { document.close() }
+                try measure("\(bytes) non-ASCII read and install") {
+                    try document.read(from: url, ofType: "net.daringfireball.markdown")
+                }
+                document.fileURL = url
+                document.fileType = "net.daringfireball.markdown"
+                let controller = try measure("\(bytes) non-ASCII create/show window") { () throws -> EditorWindowController in
+                    document.makeWindowControllers()
+                    document.showWindows()
+                    let controller = try #require(document.windowControllers.first as? EditorWindowController)
+                    controller.window?.display()
+                    return controller
+                }
+                let window = try #require(controller.window)
+                let view = controller.textView
+                // Writing at the end right after opening must not pay for
+                // fixing the unread text above it.
+                view.setSelectedRange(NSRange(location: document.storage.length, length: 0))
+                view.scrollRangeToVisible(view.selectedRange())
+                window.display()
+                measure("\(bytes) non-ASCII 10 keystrokes at end after open") {
+                    for _ in 0..<10 {
+                        view.insertText("x", replacementRange: view.selectedRange())
+                        window.display()
+                    }
+                }
+                try document.revert(toContentsOf: url, ofType: "net.daringfireball.markdown")
+                measure("\(bytes) non-ASCII bigger text") {
+                    controller.biggerText(nil)
+                    window.display()
+                }
+                controller.resetTextSize(nil)
+                try measure("\(bytes) non-ASCII revert") {
+                    try document.revert(toContentsOf: url, ofType: "net.daringfireball.markdown")
+                    window.display()
+                }
+                let undo = try #require(document.undoManager)
+                undo.groupsByEvent = false
+                let pasted = String(repeating: "- 項目 🦇 with **bold** text\n", count: 2_000)
+                measure("\(bytes) non-ASCII paste 2000 lines") {
+                    undo.beginUndoGrouping()
+                    view.insertText(pasted, replacementRange: NSRange(location: 0, length: 0))
+                    undo.endUndoGrouping()
+                    window.display()
+                }
+                measure("\(bytes) non-ASCII undo paste") {
+                    undo.undo()
+                    window.display()
+                }
+                #expect(document.storage.string == text)
+                // Work that deferred attribute fixing must not make superlinear:
+                // whole-range traversals, replacing everything and many-range edits.
+                try measure("\(bytes) non-ASCII revert and enumerate all attributes") {
+                    try document.revert(toContentsOf: url, ofType: "net.daringfireball.markdown")
+                    document.storage.enumerateAttributes(in: NSRange(location: 0, length: document.storage.length)) { _, _, _ in }
+                }
+                try document.revert(toContentsOf: url, ofType: "net.daringfireball.markdown")
+                measure("\(bytes) non-ASCII select all and paste") {
+                    undo.beginUndoGrouping()
+                    view.selectAll(nil)
+                    view.insertText(text, replacementRange: view.selectedRange())
+                    undo.endUndoGrouping()
+                    window.display()
+                }
+                try document.revert(toContentsOf: url, ofType: "net.daringfireball.markdown")
+                let storage = document.storage
+                var headings: [NSRange] = []
+                storage.source.enumerateSubstrings(in: NSRange(location: 0, length: storage.length), options: .byParagraphs) { paragraph, range, _, _ in
+                    if paragraph?.hasPrefix("## ") == true { headings.append(NSRange(location: range.location, length: 3)) }
+                }
+                measure("\(bytes) non-ASCII replace all \(headings.count) ranges") {
+                    undo.beginUndoGrouping()
+                    if view.shouldChangeText(inRanges: headings.map { NSValue(range: $0) }, replacementStrings: headings.map { _ in "" }) {
+                        storage.beginEditing()
+                        for range in headings.reversed() { storage.replaceCharacters(in: range, with: "") }
+                        storage.endEditing()
+                        view.didChangeText()
+                    }
+                    undo.endUndoGrouping()
+                    window.display()
+                }
+                measure("\(bytes) non-ASCII undo replace all") {
+                    undo.undo()
+                    window.display()
+                }
+                #expect(document.storage.string == text)
             }
         }
     }

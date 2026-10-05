@@ -8,7 +8,7 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
     private let statusLabel = NSTextField(labelWithString: "Markdown")
     private var highlighter: MarkdownHighlighter!
     private var isStyling = false
-    private var fontSize: CGFloat = 13
+    private var fontSize = MarkdownHighlighter.defaultFontSize
     private let storage: EditorStorage
 
     init(document: GonzoDocument) {
@@ -142,6 +142,8 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
         viewportChanged()
     }
 
+    var baseAttributes: [NSAttributedString.Key: Any] { highlighter.baseAttributes }
+
     func reloadFromDocument() {
         highlighter.invalidate()
         updateWordCount()
@@ -196,17 +198,15 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
 
     @objc func biggerText(_ sender: Any?) { fontSize = min(32, fontSize + 1); applyFontSize() }
     @objc func smallerText(_ sender: Any?) { fontSize = max(12, fontSize - 1); applyFontSize() }
-    @objc func resetTextSize(_ sender: Any?) { fontSize = 13; applyFontSize() }
+    @objc func resetTextSize(_ sender: Any?) { fontSize = MarkdownHighlighter.defaultFontSize; applyFontSize() }
 
     private func applyFontSize() {
+        // Restyle the viewport only. Invalidating the paragraph cache makes
+        // off-screen text adopt the new size when it scrolls into view, rather
+        // than rewriting and refixing attributes across the whole document.
         highlighter.fontSize = fontSize
-        isStyling = true
-        let selection = textView.selectedRanges
-        storage.setAttributes(highlighter.baseAttributes, range: NSRange(location: 0, length: storage.length))
-        textView.selectedRanges = selection
         textView.defaultTypingAttributes = highlighter.baseAttributes
         textView.typingAttributes = highlighter.baseAttributes
-        isStyling = false
         updateColumn()
         highlighter.invalidate()
         viewportChanged()
