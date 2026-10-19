@@ -859,6 +859,225 @@ struct DocumentTests {
         #expect(highlighter.cachedParagraphCount <= 256)
     }
 
+    @Test func spellingResultsSkipCodeAndLinkDestinations() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let controller = try #require(document.windowControllers.first as? EditorWindowController)
+        let view = controller.textView
+        let long = String(repeating: "x", count: 5000) + " `teh`"
+        view.insertText("🦇 Teh `teh` [teh](https://teh.example/teh)\n" + long, replacementRange: NSRange(location: 0, length: 0))
+        let source = document.storage.source
+        let firstLine = NSRange(location: 0, length: source.range(of: "\n").location)
+        var words: [NSRange] = []
+        source.enumerateSubstrings(in: firstLine, options: .byWords) { _, range, _, _ in
+            if source.substring(with: range).lowercased() == "teh" { words.append(range) }
+        }
+        let longCode = source.range(of: "teh", options: .backwards)
+        let stale = NSRange(location: source.length + 4, length: 3)
+        let results = (words + [longCode, stale]).map { NSTextCheckingResult.spellCheckingResult(range: $0) }
+        let kept = controller.textView(view, didCheckTextIn: NSRange(location: 0, length: source.length), types: NSTextCheckingTypes(NSTextCheckingResult.CheckingType.spelling.rawValue),
+                                       options: [:], results: results, orthography: .defaultOrthography(forLanguage: "en"), wordCount: 0)
+        let prose = source.range(of: "Teh"), label = source.range(of: "[teh]")
+        // Long paragraphs are plain text, so their backticks are prose too.
+        #expect(kept.map(\.range) == [prose, NSRange(location: label.location + 1, length: 3), longCode, stale])
+    }
+
+    @Test func checkingResultsSpanningLinesAndCorrectionsSkipCode() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let controller = try #require(document.windowControllers.first as? EditorWindowController)
+        let view = controller.textView
+        view.insertText("Teh first line\nand `teh` second", replacementRange: NSRange(location: 0, length: 0))
+        let source = document.storage.source
+        let all = NSRange(location: 0, length: source.length)
+        let code = source.range(of: "teh", options: .backwards)
+        // A spelling result in the first line must not hide the second line's code from a later result.
+        let results: [NSTextCheckingResult] = [
+            .spellCheckingResult(range: NSRange(location: 0, length: 3)),
+            .grammarCheckingResult(range: all, details: []),
+            .correctionCheckingResult(range: code, replacementString: "the"),
+            .orthographyCheckingResult(range: all, orthography: .defaultOrthography(forLanguage: "en"))
+        ]
+        let kept = controller.textView(view, didCheckTextIn: all, types: NSTextCheckingAllTypes, options: [:], results: results,
+                                       orthography: .defaultOrthography(forLanguage: "en"), wordCount: 0)
+        #expect(kept.map(\.resultType) == [.spelling, .orthography])
+    }
+
+    /// Runs Check Document Now, which yields to the run loop between windows, to completion.
+    private func checkSpelling(_ view: WriterTextView) {
+        view.checkSpelling(nil)
+        let deadline = Date(timeIntervalSinceNow: 30)
+        while view.isSearchingSpelling && Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        }
+        #expect(!view.isSearchingSpelling)
+    }
+
+    @Test func checkDocumentNowSearchesLargeDocumentsInWindowsAndStopsOnEdits() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+        let body = String(repeating: "Prose with `qzxvbnq` code.\n", count: 20_000)
+        view.insertText(body + "Final Qzxvbnq here", replacementRange: NSRange(location: 0, length: 0))
+        view.setSelectedRange(NSRange(location: 0, length: 0))
+        // The first window returns before the end of the document is reached.
+        view.checkSpelling(nil)
+        #expect(view.isSearchingSpelling)
+        view.insertText("x", replacementRange: NSRange(location: 0, length: 0))
+        let deadline = Date(timeIntervalSinceNow: 30)
+        while view.isSearchingSpelling && Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        #expect(!view.isSearchingSpelling)
+        #expect(view.selectedRange() == NSRange(location: 1, length: 0))
+        view.setSelectedRange(NSRange(location: 0, length: 0))
+        checkSpelling(view)
+        #expect(view.selectedRange() == document.storage.source.range(of: "Qzxvbnq"))
+    }
+
+    @Test func checkDocumentNowJudgesWholeWordsInLongParagraphs() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+        // Long paragraphs are searched in slices; a caret inside "to|gether"
+        // must not make the checker judge the fragment "ther".
+        view.insertText(String(repeating: "together with words ", count: 300), replacementRange: NSRange(location: 0, length: 0))
+        view.setSelectedRange(NSRange(location: 2004, length: 0))
+        checkSpelling(view)
+        #expect(view.selectedRange() == NSRange(location: 2004, length: 0))
+        view.insertText("Qzxvbnq ", replacementRange: NSRange(location: 0, length: 0))
+        view.setSelectedRange(NSRange(location: 2012, length: 0))
+        checkSpelling(view)
+        #expect(view.selectedRange() == NSRange(location: 0, length: 7))
+        // Backticks in a long paragraph are plain text, as for the underlines,
+        // wherever the wrapped search ends.
+        let long = "Intro\n`Qzxvbnq` " + String(repeating: "lorem ", count: 1500)
+        view.insertText(long, replacementRange: NSRange(location: 0, length: document.storage.length))
+        for caret in [200, 6007] {
+            view.setSelectedRange(NSRange(location: caret, length: 0))
+            checkSpelling(view)
+            #expect(view.selectedRange() == NSRange(location: 7, length: 7))
+        }
+    }
+
+    @Test func checkDocumentNowFindsTheWordStartingAtTheCaret() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+        view.insertText("Qzxvbnq word Bvcxzlq more", replacementRange: NSRange(location: 0, length: 0))
+        view.setSelectedRange(NSRange(location: 13, length: 0))
+        checkSpelling(view)
+        #expect(view.selectedRange() == NSRange(location: 13, length: 7))
+        // A long paragraph starts its search after punctuation, not whitespace.
+        let long = String(repeating: "word ", count: 1000) + "(Bvcxzlq) end"
+        view.insertText(long, replacementRange: NSRange(location: 0, length: document.storage.length))
+        let word = document.storage.source.range(of: "Bvcxzlq")
+        view.setSelectedRange(NSRange(location: word.location, length: 0))
+        checkSpelling(view)
+        #expect(view.selectedRange() == word)
+        // Stepping back from the caret never lands inside a surrogate pair.
+        view.insertText("\u{1F600}Qzxvbnq more", replacementRange: NSRange(location: 0, length: document.storage.length))
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        checkSpelling(view)
+        #expect(view.selectedRange() == NSRange(location: 2, length: 7))
+        // Repeated searches move on rather than reselecting a word ending at the caret.
+        view.insertText("word Qzxvbnq Bvcxzlq word", replacementRange: NSRange(location: 0, length: document.storage.length))
+        view.setSelectedRange(NSRange(location: 0, length: 0))
+        checkSpelling(view)
+        #expect(view.selectedRange() == NSRange(location: 5, length: 7))
+        checkSpelling(view)
+        #expect(view.selectedRange() == NSRange(location: 13, length: 7))
+    }
+
+    @Test func checkDocumentNowSkipsCodeAndLinkDestinations() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+        // Non-words in any dictionary, whatever the checker's language.
+        view.insertText("`qzxvbnq` [x](qzxvbnq) Qzxvbnq", replacementRange: NSRange(location: 0, length: 0))
+        view.setSelectedRange(NSRange(location: 0, length: 0))
+        checkSpelling(view)
+        #expect(view.selectedRange() == document.storage.source.range(of: "Qzxvbnq"))
+        // Only skipped words remain: the selection stays and the search ends.
+        document.storage.replaceCharacters(in: NSRange(location: 22, length: 8), with: "")
+        view.setSelectedRange(NSRange(location: 3, length: 0))
+        checkSpelling(view)
+        #expect(view.selectedRange() == NSRange(location: 3, length: 0))
+        #expect(document.storage.string == "`qzxvbnq` [x](qzxvbnq)")
+    }
+
+    @Test func checkDocumentNowEndsWhenOnlySkippedWordsRemain() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+        // Starting inside a token makes the checker report a part of it first
+        // and the whole token after wrapping; neither may restart the search.
+        let lines = (0..<300).map { "Line `qzx_vbnq\($0)` and `qzxvbnq'qwrtpz`" }
+        view.insertText(lines.joined(separator: "\n"), replacementRange: NSRange(location: 0, length: 0))
+        for caret in [1, 6, 11] {
+            view.setSelectedRange(NSRange(location: caret, length: 0))
+            checkSpelling(view)
+            #expect(view.selectedRange() == NSRange(location: caret, length: 0))
+        }
+        // Blanked code and links leave hyphenated tokens no fragments to return.
+        view.insertText("\nIntro `foo-qzxvbnq` and [x](foo-qzxvbnq)", replacementRange: NSRange(location: document.storage.length, length: 0))
+        let tail = document.storage.source.range(of: "foo-qzxvbnq", options: .backwards).location
+        view.setSelectedRange(NSRange(location: tail + 1, length: 0))
+        checkSpelling(view)
+        #expect(view.selectedRange() == NSRange(location: tail + 1, length: 0))
+    }
+
+    // Like AppKit's search, which starts after the selection and wraps, the
+    // word around the caret is found once nothing follows it.
+    @Test func checkDocumentNowWrapsToTheWordAroundTheCaret() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+        view.insertText("Some text Qzxvbnq more", replacementRange: NSRange(location: 0, length: 0))
+        let word = document.storage.source.range(of: "Qzxvbnq")
+        for selection in [NSRange(location: word.location + 3, length: 0), NSRange(location: 2, length: word.location + 1)] {
+            view.setSelectedRange(selection)
+            checkSpelling(view)
+            #expect(view.selectedRange() == word)
+        }
+    }
+
+    @Test func handlingSpellingResultsLeavesSourceAndSelectionAlone() throws {
+        let document = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { document.close() }
+        let view = try #require((document.windowControllers.first as? EditorWindowController)?.textView)
+        view.insertText("Qzxvbnq story with `qzxvbnq` code", replacementRange: NSRange(location: 0, length: 0))
+        view.setSelectedRange(NSRange(location: 8, length: 5))
+        let storage = document.storage
+        let (revision, words, text) = (storage.revision, storage.wordCount, storage.string)
+        let code = storage.source.range(of: "qzxvbnq", options: .backwards)
+        // AppKit's own result path, which also consults the delegate's filter.
+        view.handleTextCheckingResults([.spellCheckingResult(range: NSRange(location: 0, length: 7)), .spellCheckingResult(range: code)],
+                                       forRange: NSRange(location: 0, length: storage.length),
+                                       types: NSTextCheckingTypes(NSTextCheckingResult.CheckingType.spelling.rawValue), options: [:],
+                                       orthography: .defaultOrthography(forLanguage: "en"), wordCount: 5)
+        view.checkTextInDocument(nil)
+        #expect(storage.string == text && storage.revision == revision && storage.wordCount == words)
+        #expect(view.selectedRange() == NSRange(location: 8, length: 5))
+    }
+
+    @Test func spellCheckingPreferenceIsSharedAndRemembered() throws {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: WriterTextView.spellCheckingKey)
+        defer { defaults.removeObject(forKey: WriterTextView.spellCheckingKey) }
+        let first = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { first.close() }
+        let second = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { second.close() }
+        let views = try [first, second].map { try #require(($0.windowControllers.first as? EditorWindowController)?.textView) }
+        #expect(views.allSatisfy { $0.isContinuousSpellCheckingEnabled && !$0.isGrammarCheckingEnabled && !$0.isAutomaticSpellingCorrectionEnabled })
+        views[0].toggleContinuousSpellChecking(nil)
+        #expect(views.allSatisfy { !$0.isContinuousSpellCheckingEnabled })
+        let third = try #require(try Self.documents.openUntitledDocumentAndDisplay(true) as? GonzoDocument)
+        defer { third.close() }
+        #expect((third.windowControllers.first as? EditorWindowController)?.textView.isContinuousSpellCheckingEnabled == false)
+        views[1].toggleContinuousSpellChecking(nil)
+        #expect(views.allSatisfy { $0.isContinuousSpellCheckingEnabled })
+    }
+
 }
 
 private final class SaveCounter: @unchecked Sendable {

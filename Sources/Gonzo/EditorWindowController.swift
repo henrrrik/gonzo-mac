@@ -1,4 +1,5 @@
 import AppKit
+import GonzoCore
 
 @MainActor
 final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWindowDelegate {
@@ -45,6 +46,8 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
         textView.usesFindBar = true
         textView.isIncrementalSearchingEnabled = true
         scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(spellCheckingChanged),
+                                               name: WriterTextView.spellCheckingDidChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(viewportChanged),
                                                name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
         window.center()
@@ -72,7 +75,11 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isAutomaticLinkDetectionEnabled = false
         textView.isAutomaticDataDetectionEnabled = false
-        textView.isContinuousSpellCheckingEnabled = false
+        // Misspellings are marked with layout-manager temporary attributes, so
+        // the source and its revisions stay untouched. Nothing corrects text
+        // unless the writer picks a suggestion.
+        textView.isContinuousSpellCheckingEnabled = WriterTextView.prefersSpellChecking
+        textView.isGrammarCheckingEnabled = false
         textView.setAccessibilityLabel("Markdown editor")
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
@@ -159,6 +166,19 @@ final class EditorWindowController: NSWindowController, NSTextViewDelegate, NSWi
         textView.updateInsertionAttributes()
         updateWordCount()
         // NSTextView's undo registrations notify NSDocument of content changes.
+    }
+
+    @objc private func spellCheckingChanged() {
+        textView.isContinuousSpellCheckingEnabled = WriterTextView.prefersSpellChecking
+    }
+
+    // Results that touch code or link destinations are dropped before AppKit
+    // marks or applies them. The orthography result covers the whole range.
+    func textView(_ view: NSTextView, didCheckTextIn range: NSRange, types checkingTypes: NSTextCheckingTypes,
+                  options: [NSSpellChecker.OptionKey: Any], results: [NSTextCheckingResult],
+                  orthography: NSOrthography, wordCount: Int) -> [NSTextCheckingResult] {
+        var exclusions = SpellingExclusions()
+        return results.filter { $0.resultType == .orthography || !exclusions.excludes($0.range, in: storage) }
     }
 
     private func updateWordCount() {

@@ -13,6 +13,9 @@ public struct MarkdownSpan: Sendable {
 /// Paragraph-local styling keeps an ordinary keystroke independent of document size.
 /// Markers stay visible so source, selection, accessibility and saved text agree.
 public enum Markdown {
+    /// Longer paragraphs are not parsed, so they remain editable as plain text.
+    public static let maximumParagraphLength = 4096
+
     private struct Rule: @unchecked Sendable {
         let regex: NSRegularExpression
         let groups: [(Int, MarkdownStyle)]
@@ -26,8 +29,9 @@ public enum Markdown {
         rule(#"(\*\*|__)(.+?)(\1)"#, [(1, .marker), (2, .bold), (3, .marker)]),
         rule(#"(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)"#, [(0, .marker), (1, .italic), (2, .italic)]),
         // Code runs last so emphasis inside backticks is displayed as code.
-        rule(#"`([^`]+)`"#, [(0, .code)])
+        codeRule
     ]
+    private static let codeRule = rule(#"`([^`]+)`"#, [(0, .code)])
 
     private static func rule(_ pattern: String, _ groups: [(Int, MarkdownStyle)]) -> Rule {
         // Paragraphs are split before matching, so anchors bind to the paragraph.
@@ -37,24 +41,42 @@ public enum Markdown {
     }
 
     public static func spans(in text: String) -> [MarkdownSpan] {
-        // Bound every regex invocation, even for a file with a single huge line.
-        // Long paragraphs remain editable as plain text.
-        let source = text as NSString
         var spans: [MarkdownSpan] = []
+        forEachParagraph(in: text as NSString) { paragraph, start in
+            for span in paragraphSpans(in: paragraph) {
+                spans.append(MarkdownSpan(range: NSRange(location: start + span.range.location, length: span.range.length), style: span.style))
+            }
+        }
+        return spans
+    }
+
+    /// Code spans and link destinations hold identifiers and URLs rather than
+    /// prose, so spelling results inside them are noise.
+    public static func spellingExclusions(in text: NSString) -> [NSRange] {
+        var ranges: [NSRange] = []
+        forEachParagraph(in: text) { paragraph, start in
+            let shifted = { (range: NSRange) in NSRange(location: start + range.location, length: range.length) }
+            codeRule.regex.enumerateMatches(in: paragraph, range: NSRange(location: 0, length: (paragraph as NSString).length)) { match, _, _ in
+                if let match { ranges.append(shifted(match.range)) }
+            }
+            ranges.append(contentsOf: linkParts(in: paragraph as NSString).map { shifted($0.destination) })
+        }
+        return ranges
+    }
+
+    private static func forEachParagraph(in source: NSString, _ body: (String, Int) -> Void) {
+        // Bound every regex invocation, even for a file with a single huge line.
         var start = 0
         for end in 0...source.length {
             let isEnd = end == source.length
             let isBreak = !isEnd && [10, 13, 0x2028, 0x2029].contains(Int(source.character(at: end)))
             if isEnd || isBreak {
-                if end - start <= 4096, end > start {
-                    for span in paragraphSpans(in: source.substring(with: NSRange(location: start, length: end - start))) {
-                        spans.append(MarkdownSpan(range: NSRange(location: start + span.range.location, length: span.range.length), style: span.style))
-                    }
+                if end - start <= maximumParagraphLength, end > start {
+                    body(source.substring(with: NSRange(location: start, length: end - start)), start)
                 }
                 start = end + 1
             }
         }
-        return spans
     }
 
     private static func paragraphSpans(in text: String) -> [MarkdownSpan] {
@@ -80,10 +102,16 @@ public enum Markdown {
         return spans
     }
 
+    private static func links(in text: NSString) -> [MarkdownSpan] {
+        linkParts(in: text).flatMap { link in
+            [MarkdownSpan(range: link.whole, style: .marker), MarkdownSpan(range: link.label, style: .link)]
+        }
+    }
+
     // Each character is visited at most once. Escapes consume two characters;
     // incomplete destinations cannot trigger regex backtracking.
-    private static func links(in text: NSString) -> [MarkdownSpan] {
-        var result: [MarkdownSpan] = []
+    private static func linkParts(in text: NSString) -> [(whole: NSRange, label: NSRange, destination: NSRange)] {
+        var result: [(whole: NSRange, label: NSRange, destination: NSRange)] = []
         var opening: Int?
         var index = 0
         while index < text.length {
@@ -100,8 +128,9 @@ public enum Markdown {
                         index += text.character(at: index) == 92 ? min(2, text.length - index) : 1
                     }
                     if index < text.length, index > destinationStart {
-                        result.append(MarkdownSpan(range: NSRange(location: start, length: index - start + 1), style: .marker))
-                        result.append(MarkdownSpan(range: NSRange(location: start + 1, length: labelEnd - start - 1), style: .link))
+                        result.append((whole: NSRange(location: start, length: index - start + 1),
+                                       label: NSRange(location: start + 1, length: labelEnd - start - 1),
+                                       destination: NSRange(location: destinationStart, length: index - destinationStart)))
                     }
                 }
             }

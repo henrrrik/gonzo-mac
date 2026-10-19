@@ -87,6 +87,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         findItem("Find Next", .nextMatch, key: "g", in: find)
         findItem("Find Previous", .previousMatch, key: "g", modifiers: [.command, .shift], in: find)
         findItem("Use Selection for Find", .setSearchString, key: "e", in: find)
+        let spelling = submenu("Spelling and Grammar", in: edit)
+        item("Show Spelling and Grammar", #selector(NSText.showGuessPanel(_:)), key: ":", in: spelling)
+        item("Check Document Now", #selector(NSText.checkSpelling(_:)), key: ";", in: spelling)
+        spelling.addItem(.separator())
+        item("Check Spelling While Typing", #selector(NSTextView.toggleContinuousSpellChecking(_:)), in: spelling)
 
         let format = submenu("Format", in: main)
         item("Bold", #selector(WriterTextView.markdownBold(_:)), key: "b", in: format)

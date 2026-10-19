@@ -91,6 +91,12 @@ import Testing
     #expect(Markdown.spans(in: longLine).contains { $0.style == .bold })
 }
 
+@Test func spellingSkipsCodeSpansAndLinkDestinations() {
+    let text = "🦇 Teh `teh` [teh](https://teh.example/\\)x)\r\n**`code`**\n" + String(repeating: "x", count: 5000) + " `long`"
+    let excluded = Markdown.spellingExclusions(in: text as NSString).map((text as NSString).substring(with:))
+    #expect(excluded == ["`teh`", "https://teh.example/\\)x", "`code`"])
+}
+
 // ICU's multiline anchors also match after U+000B, U+000C and U+0085, which do
 // not split paragraphs. Block syntax must anchor only at the paragraph start,
 // otherwise a paragraph of those characters makes each pattern quadratic.
